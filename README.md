@@ -24,26 +24,7 @@ scp onvif_recorder root@<router-ip>:/root/
 scp onvif-recorder.service root@<router-ip>:/etc/systemd/system/
 ```
 
-### Step 3 — Configure your cameras
-
-SSH into the router and create `/root/cameras.json` listing each ONVIF-capable
-camera UniFi Protect already manages:
-
-```bash
-ssh root@<router-ip>
-```
-
-```json
-[
-  { "ip": "192.168.1.108", "user": "admin", "password": "your-camera-password" },
-  { "ip": "192.168.1.109", "user": "admin", "password": "your-camera-password" }
-]
-```
-
-> **Tip:** Camera credentials are the ONVIF/RTSP credentials set on the camera
-> itself, not your UniFi account password.
-
-### Step 4 — Enable and start the service
+### Step 3 — Enable and start the service
 
 ```bash
 chmod +x /root/onvif_recorder
