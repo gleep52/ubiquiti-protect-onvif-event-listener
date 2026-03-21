@@ -1,0 +1,239 @@
+/**
+ * test_ubv_thumbnail.cpp
+ *
+ * Round-trip test for the ubv::decode / ubv::encode library.
+ *
+ * Self-contained mode (default, used by bazel test):
+ *   Reads snapshot_108.jpg and snapshot_109.jpg, encodes them into a
+ *   temporary UBV file, decodes it back, and verifies round-trip fidelity.
+ *
+ * File mode (manual inspection):
+ *   bazel run //test:test_ubv_thumbnail -- <path-to.ubv>
+ *   Decodes an existing UBV file and runs the same verification steps.
+ */
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "../ubv_thumbnail.hpp"
+
+static std::vector<uint8_t> read_file(const std::string& path) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  if (!f) throw std::runtime_error("cannot open: " + path);
+  auto sz = f.tellg();
+  f.seekg(0);
+  std::vector<uint8_t> buf(static_cast<size_t>(sz));
+  f.read(reinterpret_cast<char*>(buf.data()), sz);
+  if (!f) throw std::runtime_error("read error: " + path);
+  return buf;
+}
+
+static bool check_markers(const std::vector<ubv::Frame>& frames) {
+  bool ok = true;
+  for (size_t i = 0; i < frames.size(); ++i) {
+    const auto& j = frames[i].jpeg;
+    const bool soi = j.size() >= 2 && j[0] == 0xff && j[1] == 0xd8;
+    const bool eoi = j.size() >= 2 && j[j.size()-2] == 0xff && j[j.size()-1] == 0xd9;
+    if (!soi || !eoi) {
+      std::cerr << "  [" << i << "] BAD JPEG markers"
+                << " SOI=" << soi << " EOI=" << eoi << '\n';
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+// -- Self-contained round-trip test ──────────────────────────────────────────
+// Finds the snapshot JPEGs relative to the binary (Bazel runfiles).
+static int run_self_contained() {
+  // Locate snapshot files in the Bazel runfiles tree.
+  const char* srcdir = std::getenv("TEST_SRCDIR");
+  const char* workspace = std::getenv("TEST_WORKSPACE");
+  std::string base;
+  if (srcdir && workspace)
+    base = std::string(srcdir) + "/" + workspace + "/test/";
+  else
+    base = "test/";  // fallback for manual runs from project root
+
+  const std::string path108 = base + "testdata/snapshot_108.jpg";
+  const std::string path109 = base + "testdata/snapshot_109.jpg";
+  const std::string ubv_out = "/tmp/ubv_roundtrip_test.ubv";
+
+  std::cout << "=== Self-contained round-trip test ===\n";
+
+  // Build input frames from the two snapshot JPEGs.
+  std::vector<ubv::Frame> input_frames;
+  try {
+    input_frames.push_back({1000000000000ULL, read_file(path108)});
+    input_frames.push_back({1000000001000ULL, read_file(path109)});
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL: could not read snapshot files: " << e.what() << '\n';
+    return 1;
+  }
+  std::cout << "  Loaded " << input_frames.size() << " frames from snapshot JPEGs\n";
+  for (size_t i = 0; i < input_frames.size(); ++i)
+    std::cout << "  [" << i << "] ts=" << input_frames[i].timestamp_ms
+              << "  jpeg=" << input_frames[i].jpeg.size() << " bytes\n";
+
+  // Verify input JPEG markers.
+  if (!check_markers(input_frames)) {
+    std::cerr << "FAIL: input snapshot files have bad JPEG markers\n";
+    return 1;
+  }
+
+  // Encode.
+  try {
+    ubv::encode(ubv_out, input_frames);
+    std::cout << "  Encoded -> " << ubv_out << '\n';
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL encode: " << e.what() << '\n';
+    return 1;
+  }
+
+  // Decode.
+  std::vector<ubv::Frame> decoded;
+  try {
+    decoded = ubv::decode(ubv_out);
+    std::cout << "  Decoded " << decoded.size() << " frame(s)\n";
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL decode: " << e.what() << '\n';
+    return 1;
+  }
+
+  // Compare.
+  bool all_ok = true;
+  if (input_frames.size() != decoded.size()) {
+    std::cerr << "  MISMATCH frame count: " << input_frames.size()
+              << " vs " << decoded.size() << '\n';
+    all_ok = false;
+  } else {
+    for (size_t i = 0; i < input_frames.size(); ++i) {
+      const bool ts_ok   = input_frames[i].timestamp_ms == decoded[i].timestamp_ms;
+      const bool jpeg_ok = input_frames[i].jpeg         == decoded[i].jpeg;
+      if (!ts_ok || !jpeg_ok) {
+        std::cerr << "  [" << i << "] MISMATCH"
+                  << (ts_ok   ? "" : " timestamp")
+                  << (jpeg_ok ? "" : " jpeg_bytes") << '\n';
+        all_ok = false;
+      }
+    }
+  }
+
+  // Also test append() builds the same result one frame at a time.
+  const std::string ubv_append = "/tmp/ubv_append_test.ubv";
+  std::remove(ubv_append.c_str());
+  try {
+    for (const auto& f : input_frames)
+      ubv::append(ubv_append, f);
+    std::vector<ubv::Frame> appended = ubv::decode(ubv_append);
+    if (appended.size() != input_frames.size()) {
+      std::cerr << "  MISMATCH append frame count\n";
+      all_ok = false;
+    } else {
+      for (size_t i = 0; i < input_frames.size(); ++i) {
+        if (input_frames[i].timestamp_ms != appended[i].timestamp_ms ||
+            input_frames[i].jpeg         != appended[i].jpeg) {
+          std::cerr << "  [" << i << "] MISMATCH after append\n";
+          all_ok = false;
+        }
+      }
+    }
+    if (all_ok) std::cout << "  append() round-trip OK\n";
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL append test: " << e.what() << '\n';
+    all_ok = false;
+  }
+
+  std::cout << "\n=== Result ===\n";
+  if (all_ok) {
+    std::cout << "PASS: " << input_frames.size()
+              << " frame(s), encode/decode/append round-trip identical\n";
+    return 0;
+  }
+  std::cout << "FAIL\n";
+  return 1;
+}
+
+// -- File-based mode (manual inspection of an existing UBV) ──────────────────
+static int run_file_mode(const std::string& input_path) {
+  std::cout << "=== Step 1: Decode " << input_path << " ===\n";
+  std::vector<ubv::Frame> frames;
+  try {
+    frames = ubv::decode(input_path);
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL decode: " << e.what() << '\n';
+    return 1;
+  }
+  if (frames.empty()) {
+    std::cerr << "FAIL: no JPEG frames found\n";
+    return 1;
+  }
+  std::cout << "  Decoded " << frames.size() << " frame(s)\n";
+  for (size_t i = 0; i < frames.size(); ++i)
+    std::cout << "  [" << i << "] ts=" << frames[i].timestamp_ms
+              << "  jpeg=" << frames[i].jpeg.size() << " bytes\n";
+
+  std::cout << "\n=== Step 2: Verify JPEG markers ===\n";
+  const bool markers_ok = check_markers(frames);
+  if (markers_ok)
+    std::cout << "  All " << frames.size() << " frame(s) have valid SOI+EOI\n";
+
+  std::cout << "\n=== Step 3: Re-encode ===\n";
+  const std::string reenc = "/tmp/ubv_test_reencoded.ubv";
+  try {
+    ubv::encode(reenc, frames);
+    std::cout << "  Encoded -> " << reenc << '\n';
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL encode: " << e.what() << '\n';
+    return 1;
+  }
+
+  std::cout << "\n=== Step 4: Decode re-encoded ===\n";
+  std::vector<ubv::Frame> frames2;
+  try {
+    frames2 = ubv::decode(reenc);
+    std::cout << "  Decoded " << frames2.size() << " frame(s)\n";
+  } catch (const std::exception& e) {
+    std::cerr << "FAIL decode2: " << e.what() << '\n';
+    return 1;
+  }
+
+  std::cout << "\n=== Step 5: Compare ===\n";
+  bool all_ok = markers_ok;
+  if (frames.size() != frames2.size()) {
+    std::cerr << "  MISMATCH frame count: " << frames.size()
+              << " vs " << frames2.size() << '\n';
+    all_ok = false;
+  } else {
+    for (size_t i = 0; i < frames.size(); ++i) {
+      const bool ts_ok   = frames[i].timestamp_ms == frames2[i].timestamp_ms;
+      const bool jpeg_ok = frames[i].jpeg         == frames2[i].jpeg;
+      if (!ts_ok || !jpeg_ok) {
+        std::cerr << "  [" << i << "] MISMATCH"
+                  << (ts_ok   ? "" : " timestamp")
+                  << (jpeg_ok ? "" : " jpeg_bytes") << '\n';
+        all_ok = false;
+      }
+    }
+  }
+
+  std::cout << "\n=== Result ===\n";
+  if (all_ok) {
+    std::cout << "PASS: " << frames.size() << " frame(s), round-trip identical\n";
+    return 0;
+  }
+  std::cout << "FAIL\n";
+  return 1;
+}
+
+int main(int argc, char* argv[]) {
+  if (argc >= 2)
+    return run_file_mode(argv[1]);
+  return run_self_contained();
+}

@@ -1,0 +1,58 @@
+# Platform-select helpers: pick host pkg-config libs or arm64 sysroot stubs.
+_XML2   = select({"@platforms//cpu:aarch64": ["@arm64_sysroot//:libxml2"],
+                  "//conditions:default":    ["@libxml2"]})
+_CURL   = select({"@platforms//cpu:aarch64": ["@arm64_sysroot//:libcurl"],
+                  "//conditions:default":    ["@libcurl"]})
+_SSL    = select({"@platforms//cpu:aarch64": ["@arm64_sysroot//:openssl"],
+                  "//conditions:default":    ["@openssl"]})
+_SQLITE = select({"@platforms//cpu:aarch64": ["@arm64_sysroot//:sqlite3"],
+                  "//conditions:default":    ["@sqlite3"]})
+_MHD    = select({"@platforms//cpu:aarch64": ["@arm64_sysroot//:libmicrohttpd"],
+                  "//conditions:default":    ["@libmicrohttpd"]})
+_PQ     = select({"@platforms//cpu:aarch64": ["@arm64_sysroot//:libpq"],
+                  "//conditions:default":    ["@libpq"]})
+
+cc_library(
+    name = "onvif_listener",
+    srcs = ["onvif_listener.cpp"],
+    hdrs = ["onvif_listener.hpp"],
+    deps = _CURL + _XML2 + _SSL,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "ubv_thumbnail",
+    srcs = ["ubv_thumbnail.cpp"],
+    hdrs = ["ubv_thumbnail.hpp"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "detection_recorder",
+    srcs = ["detection_recorder.cpp"],
+    hdrs = ["detection_recorder.hpp"],
+    deps = [
+        ":onvif_listener",
+        ":ubv_thumbnail",
+    ] + _CURL + _SQLITE + _PQ,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "unifi_camera_config",
+    srcs = ["unifi_camera_config.cpp"],
+    hdrs = ["unifi_camera_config.hpp"],
+    deps = [":onvif_listener"] + _PQ,
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "onvif_recorder",
+    srcs = ["main.cpp"],
+    deps = [
+        ":detection_recorder",
+        ":onvif_listener",
+        ":unifi_camera_config",
+    ],
+)
+

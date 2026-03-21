@@ -1,0 +1,699 @@
+/**
+ * onvif_listener.cpp -- implementation of the onvif::OnvifListener library.
+ *
+ * Deps: libcurl, libssl/libcrypto (OpenSSL), libxml2
+ */
+
+#include "onvif_listener.hpp"
+
+#include <curl/curl.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xpath.h>
+#include <libxml/xpathInternals.h>
+
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace onvif {
+
+// ============================================================
+// Library lifecycle
+// ============================================================
+void global_init() {
+  curl_global_init(CURL_GLOBAL_ALL);
+  xmlInitParser();
+  LIBXML_TEST_VERSION
+}
+
+void global_cleanup() {
+  curl_global_cleanup();
+  xmlCleanupParser();
+}
+
+// ============================================================
+// Internal helpers (all anonymous-namespace / file-local)
+// ============================================================
+namespace {
+
+// -------------------------------------------------------
+// Base64
+// -------------------------------------------------------
+static const char B64[] =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";  // NOLINT
+
+std::string base64_encode(const unsigned char* d, size_t len) {
+  std::string out;
+  out.reserve(((len + 2) / 3) * 4);
+  for (size_t i = 0; i < len; i += 3) {
+    unsigned char b0 =            d[i];
+    unsigned char b1 = (i + 1 < len) ? d[i + 1] : 0;
+    unsigned char b2 = (i + 2 < len) ? d[i + 2] : 0;
+    out += B64[b0 >> 2];
+    out += B64[((b0 & 0x03) << 4) | (b1 >> 4)];
+    out += (i + 1 < len) ? B64[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=';
+    out += (i + 2 < len) ? B64[b2 & 0x3f] : '=';
+  }
+  return out;
+}
+
+// -------------------------------------------------------
+// Timestamps
+// -------------------------------------------------------
+std::string utc_now_iso8601() {
+  std::time_t t = std::time(nullptr);
+  std::tm tm{};
+  gmtime_r(&t, &tm);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
+}
+
+std::string utc_now_iso8601_ms() {
+  auto now = std::chrono::system_clock::now();
+  std::time_t t = std::chrono::system_clock::to_time_t(now);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()) % 1000;
+  std::tm tm{};
+  gmtime_r(&t, &tm);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+  std::ostringstream oss;
+  oss << buf << '.' << std::setfill('0') << std::setw(3) << ms.count() << 'Z';
+  return oss.str();
+}
+
+// -------------------------------------------------------
+// JSON string escaping (used by RawRecorder)
+// -------------------------------------------------------
+std::string json_str(const std::string& s) {
+  std::string out;
+  out.reserve(s.size() + 4);
+  out += '"';
+  for (unsigned char c : s) {
+    if (c == '"') {
+      out += "\\\"";
+    } else if (c == '\\') {
+      out += "\\\\";
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else if (c == '\t') {
+      out += "\\t";
+    } else if (c < 0x20) {
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+      out += buf;
+    } else {
+      out += static_cast<char>(c);
+    }
+  }
+  out += '"';
+  return out;
+}
+
+// -------------------------------------------------------
+// RawRecorder -- thread-safe JSON Lines sink for raw HTTP exchanges
+// -------------------------------------------------------
+class RawRecorder {
+ public:
+  explicit RawRecorder(const std::string& path) {
+    file_.open(path, std::ios::app);
+    if (!file_.is_open())
+      throw std::runtime_error("Cannot open raw recording file: " + path);
+  }
+
+  // Record one complete request/response exchange.
+  void record(const std::string& camera_ip,
+              const std::string& url,
+              const std::string& soap_action,
+              const std::string& request,
+              int64_t            response_status,
+              const std::string& response) {
+    std::string line;
+    line += '{';
+    line += json_str("timestamp")       + ':' + json_str(utc_now_iso8601_ms()) + ',';
+    line += json_str("camera_ip")       + ':' + json_str(camera_ip)            + ',';
+    line += json_str("url")             + ':' + json_str(url)                  + ',';
+    line += json_str("soap_action")     + ':' + json_str(soap_action)          + ',';
+    line += json_str("request")         + ':' + json_str(request)              + ',';
+    line += json_str("response_status") + ':' + std::to_string(response_status)+ ',';
+    line += json_str("response")        + ':' + json_str(response);
+    line += "}\n";
+
+    std::lock_guard<std::mutex> lk(mu_);
+    file_ << line;
+    file_.flush();
+  }
+
+ private:
+  std::ofstream file_;
+  std::mutex    mu_;
+};
+
+// -------------------------------------------------------
+// WS-Security UsernameToken (PasswordDigest)
+// -------------------------------------------------------
+struct WSSecurity {
+  std::string nonce_b64;
+  std::string created;
+  std::string digest;
+};
+
+WSSecurity make_wssecurity(const std::string& password) {
+  unsigned char nonce[16];
+  RAND_bytes(nonce, sizeof(nonce));
+
+  std::string created  = utc_now_iso8601();
+  std::string nonce_b64 = base64_encode(nonce, sizeof(nonce));
+
+  // digest = Base64(SHA1(nonce_bytes || created || password))
+  std::vector<unsigned char> pre;
+  pre.reserve(16 + created.size() + password.size());
+  pre.insert(pre.end(), nonce, nonce + 16);
+  pre.insert(pre.end(), created.begin(), created.end());
+  pre.insert(pre.end(), password.begin(), password.end());
+
+  unsigned char hash[SHA_DIGEST_LENGTH];
+  SHA1(pre.data(), pre.size(), hash);
+
+  return {nonce_b64, created, base64_encode(hash, SHA_DIGEST_LENGTH)};
+}
+
+// -------------------------------------------------------
+// SOAP envelope builder
+// -------------------------------------------------------
+std::string build_soap(
+  const std::string& username,
+  const std::string& password,
+  const std::string& body_xml,
+  const std::string& wsa_to     = "",
+  const std::string& wsa_action = "") {
+  WSSecurity ws = make_wssecurity(password);
+
+  std::ostringstream s;
+  s << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+       "<SOAP-ENV:Envelope\n"
+       "  xmlns:SOAP-ENV=\"http://www.w3.org/2003/05/soap-envelope\"\n"
+       "  xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"\n"  // NOLINT(whitespace/line_length)
+       "  xmlns:wsu=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\"\n"  // NOLINT(whitespace/line_length)
+       "  xmlns:tev=\"http://www.onvif.org/ver10/events/wsdl\"\n"
+       "  xmlns:wsnt=\"http://docs.oasis-open.org/wsn/b-2\"\n"
+       "  xmlns:wsa5=\"http://www.w3.org/2005/08/addressing\"\n"
+       "  xmlns:tt=\"http://www.onvif.org/ver10/schema\"\n"
+       "  xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\">\n"
+       "  <SOAP-ENV:Header>\n"
+       "    <wsse:Security SOAP-ENV:mustUnderstand=\"true\">\n"
+       "      <wsu:Timestamp wsu:Id=\"Time\">\n"
+       "        <wsu:Created>" << ws.created << "</wsu:Created>\n"
+       "      </wsu:Timestamp>\n"
+       "      <wsse:UsernameToken>\n"
+       "        <wsse:Username>" << username << "</wsse:Username>\n"
+       "        <wsse:Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">"  // NOLINT(whitespace/line_length)
+    << ws.digest << "</wsse:Password>\n"
+       "        <wsse:Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">"  // NOLINT(whitespace/line_length)
+    << ws.nonce_b64 << "</wsse:Nonce>\n"
+       "        <wsu:Created>" << ws.created << "</wsu:Created>\n"
+       "      </wsse:UsernameToken>\n"
+       "    </wsse:Security>\n";
+
+  if (!wsa_to.empty())
+    s << "    <wsa5:To>" << wsa_to << "</wsa5:To>\n";
+  if (!wsa_action.empty())
+    s << "    <wsa5:Action>" << wsa_action << "</wsa5:Action>\n";
+
+  s << "  </SOAP-ENV:Header>\n"
+       "  <SOAP-ENV:Body>\n"
+    << body_xml
+    << "  </SOAP-ENV:Body>\n"
+       "</SOAP-ENV:Envelope>\n";
+
+  return s.str();
+}
+
+// -------------------------------------------------------
+// HTTP POST via libcurl
+// -------------------------------------------------------
+struct HttpResponse {
+  int64_t     status_code{0};
+  std::string body;
+};
+
+size_t curl_write_cb(void* ptr, size_t sz, size_t nmemb, std::string* out) {
+  out->append(static_cast<char*>(ptr), sz * nmemb);
+  return sz * nmemb;
+}
+
+HttpResponse soap_post(
+  const std::string& url,
+  const std::string& body,
+  const std::string& action,
+  int timeout_sec = 30) {
+  CURL* c = curl_easy_init();
+  if (!c) throw std::runtime_error("curl_easy_init failed");
+
+  HttpResponse resp;
+
+  std::string ct = "Content-Type: application/soap+xml; charset=utf-8";
+  if (!action.empty()) ct += "; action=\"" + action + "\"";
+  std::string act_hdr = "SOAPAction: \"" + action + "\"";
+
+  struct curl_slist* hdrs = nullptr;
+  hdrs = curl_slist_append(hdrs, ct.c_str());
+  hdrs = curl_slist_append(hdrs, act_hdr.c_str());
+
+  curl_easy_setopt(c, CURLOPT_URL,            url.c_str());
+  curl_easy_setopt(c, CURLOPT_POSTFIELDS,     body.c_str());
+  // libcurl requires long for size/timeout params  // NOLINT(runtime/int)
+  curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE,  static_cast<long>(body.size()));  // NOLINT
+  curl_easy_setopt(c, CURLOPT_HTTPHEADER,     hdrs);
+  curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,  curl_write_cb);
+  curl_easy_setopt(c, CURLOPT_WRITEDATA,      &resp.body);
+  curl_easy_setopt(c, CURLOPT_TIMEOUT,        static_cast<long>(timeout_sec));  // NOLINT
+  curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);  // NOLINT(runtime/int)
+
+  CURLcode rc = curl_easy_perform(c);
+  curl_slist_free_all(hdrs);
+
+  if (rc != CURLE_OK) {
+    curl_easy_cleanup(c);
+    throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(rc));
+  }
+
+  long code = 0;  // NOLINT(runtime/int)
+  curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+  resp.status_code = static_cast<int64_t>(code);
+  curl_easy_cleanup(c);
+  return resp;
+}
+
+// -------------------------------------------------------
+// libxml2 XPath helper
+// -------------------------------------------------------
+struct XmlDoc {
+  xmlDocPtr          doc{nullptr};
+  xmlXPathContextPtr ctx{nullptr};
+
+  explicit XmlDoc(const std::string& xml) {
+    doc = xmlParseDoc(reinterpret_cast<const xmlChar*>(xml.c_str()));
+    if (!doc) throw std::runtime_error("XML parse error");
+    ctx = xmlXPathNewContext(doc);
+    if (!ctx) {
+      xmlFreeDoc(doc);
+      throw std::runtime_error("XPath ctx error");
+    }
+    register_ns(ctx);
+  }
+
+  ~XmlDoc() {
+    if (ctx) xmlXPathFreeContext(ctx);
+    if (doc) xmlFreeDoc(doc);
+  }
+
+  XmlDoc(const XmlDoc&)            = delete;
+  XmlDoc& operator=(const XmlDoc&) = delete;
+
+  static void register_ns(xmlXPathContextPtr c) {
+    xmlXPathRegisterNs(c, BAD_CAST "s",
+      BAD_CAST "http://www.w3.org/2003/05/soap-envelope");
+    xmlXPathRegisterNs(c, BAD_CAST "tev",
+      BAD_CAST "http://www.onvif.org/ver10/events/wsdl");
+    xmlXPathRegisterNs(c, BAD_CAST "wsnt",
+      BAD_CAST "http://docs.oasis-open.org/wsn/b-2");
+    xmlXPathRegisterNs(c, BAD_CAST "wsa5",
+      BAD_CAST "http://www.w3.org/2005/08/addressing");
+    xmlXPathRegisterNs(c, BAD_CAST "wsa",
+      BAD_CAST "http://schemas.xmlsoap.org/ws/2004/08/addressing");
+    xmlXPathRegisterNs(c, BAD_CAST "tt",
+      BAD_CAST "http://www.onvif.org/ver10/schema");
+  }
+
+  using XPathObj = std::unique_ptr<xmlXPathObject, decltype(&xmlXPathFreeObject)>;
+
+  XPathObj xpath(const std::string& expr,
+                 xmlNodePtr context_node = nullptr) const {
+    xmlNodePtr old_node = ctx->node;
+    if (context_node) ctx->node = context_node;
+
+    xmlXPathObjectPtr obj =
+      xmlXPathEvalExpression(reinterpret_cast<const xmlChar*>(expr.c_str()), ctx);
+
+    if (context_node) ctx->node = old_node;
+
+    return {obj, xmlXPathFreeObject};
+  }
+
+  std::string text(const std::string& expr,
+                   xmlNodePtr context_node = nullptr) const {
+    auto obj = xpath(expr, context_node);
+    if (!obj) return {};
+    if (obj->type == XPATH_NODESET &&
+        obj->nodesetval && obj->nodesetval->nodeNr > 0) {
+      xmlChar* c = xmlNodeGetContent(obj->nodesetval->nodeTab[0]);
+      if (!c) return {};
+      std::string s(reinterpret_cast<char*>(c));
+      xmlFree(c);
+      return s;
+    }
+    if (obj->type == XPATH_STRING && obj->stringval)
+      return reinterpret_cast<char*>(obj->stringval);
+    return {};
+  }
+
+  static std::string trim(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+  }
+};
+
+// -------------------------------------------------------
+// Internal notification struct (parsed from XML)
+// -------------------------------------------------------
+struct Notification {
+  std::string topic;
+  std::string event_time;
+  std::string property_op;
+  std::map<std::string, std::string> source;
+  std::map<std::string, std::string> data;
+};
+
+// -------------------------------------------------------
+// CameraWorker -- manages one camera's PullPoint lifecycle
+// -------------------------------------------------------
+class CameraWorker {
+ public:
+  CameraWorker(const CameraConfig& cfg,
+               const EventCallback& cb,
+               const std::atomic<bool>& running,
+               RawRecorder* raw,
+               bool verbose)
+    : cfg_(cfg), cb_(cb), running_(running), raw_(raw), verbose_(verbose) {}
+
+  void run() {
+    vlog("started");
+    const int max_failures = cfg_.max_consecutive_failures;  // 0 = unlimited
+    int consecutive_failures = 0;
+
+    while (running_) {
+      try {
+        std::string sub_url = create_subscription();
+        if (sub_url.empty()) {
+          ++consecutive_failures;
+          if (max_failures > 0 && consecutive_failures >= max_failures) {
+            log("giving up after " + std::to_string(consecutive_failures) +
+                " consecutive subscription failures"
+                " -- camera may not support ONVIF pull-point events");
+            return;
+          }
+          log("failed to get subscription URL, retrying in " +
+              std::to_string(cfg_.retry_interval_sec) + "s" +
+              (max_failures > 0 ? " (" + std::to_string(consecutive_failures) +
+               "/" + std::to_string(max_failures) + ")" : ""));
+          sleep_interruptible(cfg_.retry_interval_sec);
+          continue;
+        }
+
+        // Successful subscription -- reset the failure counter.
+        consecutive_failures = 0;
+        vlog("subscription -> " + sub_url);
+
+        auto renew_at =
+          std::chrono::steady_clock::now() + std::chrono::seconds(90);
+
+        while (running_) {
+          if (std::chrono::steady_clock::now() >= renew_at) {
+            renew(sub_url);
+            renew_at = std::chrono::steady_clock::now()
+                       + std::chrono::seconds(90);
+          }
+          pull(sub_url);
+        }
+      } catch (const std::exception& e) {
+        ++consecutive_failures;
+        if (max_failures > 0 && consecutive_failures >= max_failures) {
+          log(std::string("giving up after ") +
+              std::to_string(consecutive_failures) +
+              " consecutive failures -- camera may not support ONVIF pull-point events"
+              " (last error: " + e.what() + ")");
+          return;
+        }
+        log(std::string("error: ") + e.what() +
+            ", reconnecting in " + std::to_string(cfg_.retry_interval_sec) + "s" +
+            (max_failures > 0 ? " (" + std::to_string(consecutive_failures) +
+             "/" + std::to_string(max_failures) + ")" : ""));
+        sleep_interruptible(cfg_.retry_interval_sec);
+      }
+    }
+    vlog("stopped");
+  }
+
+ private:
+  void log(const std::string& msg) const {
+    std::cerr << '[' << cfg_.ip << "] " << msg << '\n';
+  }
+
+  void vlog(const std::string& msg) const {
+    if (verbose_) std::cerr << '[' << cfg_.ip << "] " << msg << '\n';
+  }
+
+  void sleep_interruptible(int secs) {
+    for (int i = 0; i < secs && running_; ++i)
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+
+  std::string event_url() const {
+    return "http://" + cfg_.ip + "/onvif/event_service";
+  }
+
+  // soap_post wrapper: records the exchange if raw recording is enabled.
+  HttpResponse soap_post_r(const std::string& url,
+                           const std::string& body,
+                           const std::string& action,
+                           int timeout_sec) {
+    auto resp = soap_post(url, body, action, timeout_sec);
+    if (raw_)
+      raw_->record(cfg_.ip, url, action, body,
+                   resp.status_code, resp.body);
+    return resp;
+  }
+
+  // CreatePullPointSubscription -> subscription URL
+  std::string create_subscription() {
+    static const char* ACTION =
+      "http://www.onvif.org/ver10/events/wsdl/EventPortType/"
+      "CreatePullPointSubscriptionRequest";
+
+    const std::string body =
+      "    <tev:CreatePullPointSubscription>\n"
+      "      <tev:InitialTerminationTime>PT120S</tev:InitialTerminationTime>\n"
+      "    </tev:CreatePullPointSubscription>\n";
+
+    auto soap = build_soap(cfg_.user, cfg_.password, body, event_url(), ACTION);
+    auto resp = soap_post_r(event_url(), soap, ACTION, 20);
+
+    if (resp.status_code != 200) {
+      vlog("CreatePullPointSubscription HTTP " +
+           std::to_string(resp.status_code) +
+           ": " + resp.body.substr(0, 300));
+      return {};
+    }
+
+    try {
+      XmlDoc doc(resp.body);
+      return XmlDoc::trim(
+        doc.text("//*[local-name()='SubscriptionReference']"
+                 "/*[local-name()='Address']"));
+    } catch (const std::exception& e) {
+      log(std::string("parse sub URL: ") + e.what());
+      return {};
+    }
+  }
+
+  void renew(const std::string& sub_url) {
+    static const char* ACTION =
+      "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest";
+
+    const std::string body =
+      "    <wsnt:Renew>\n"
+      "      <wsnt:TerminationTime>PT120S</wsnt:TerminationTime>\n"
+      "    </wsnt:Renew>\n";
+
+    try {
+      auto soap = build_soap(cfg_.user, cfg_.password, body, sub_url, ACTION);
+      auto resp = soap_post_r(sub_url, soap, ACTION, 15);
+      if (resp.status_code == 200)
+        vlog("subscription renewed");
+      else
+        log("renew HTTP " + std::to_string(resp.status_code));
+    } catch (const std::exception& e) {
+      log(std::string("renew error: ") + e.what());
+    }
+  }
+
+  void pull(const std::string& sub_url) {
+    static const char* ACTION =
+      "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription/"
+      "PullMessagesRequest";
+
+    const std::string body =
+      "    <tev:PullMessages>\n"
+      "      <tev:MessageLimit>100</tev:MessageLimit>\n"
+      "      <tev:Timeout>PT5S</tev:Timeout>\n"
+      "    </tev:PullMessages>\n";
+
+    auto soap = build_soap(cfg_.user, cfg_.password, body, sub_url, ACTION);
+    // HTTP timeout > SOAP pull timeout (5 s) to allow for network headroom
+    auto resp = soap_post_r(sub_url, soap, ACTION, 20);
+
+    if (resp.status_code != 200)
+      throw std::runtime_error(
+        "PullMessages HTTP " + std::to_string(resp.status_code) +
+        ": " + resp.body.substr(0, 300));
+
+    auto events = parse_notifications(resp.body);
+    if (!events.empty())
+      vlog("received " + std::to_string(events.size()) + " event(s)");
+
+    for (auto& n : events) {
+      vlog("  topic=" + n.topic +
+           " op="    + n.property_op +
+           " t="     + n.event_time);
+      cb_(OnvifEvent{
+        cfg_.ip, cfg_.user,
+        n.topic, n.event_time, n.property_op,
+        n.source, n.data});
+    }
+  }
+
+  std::vector<Notification> parse_notifications(const std::string& xml) {
+    std::vector<Notification> out;
+    XmlDoc doc(xml);
+
+    auto notifs = doc.xpath("//wsnt:NotificationMessage");
+    if (!notifs || !notifs->nodesetval) return out;
+
+    for (int i = 0; i < notifs->nodesetval->nodeNr; ++i) {
+      xmlNodePtr node = notifs->nodesetval->nodeTab[i];
+      Notification n;
+
+      n.topic = XmlDoc::trim(doc.text("wsnt:Topic", node));
+
+      auto msg_obj = doc.xpath(".//tt:Message", node);
+      if (!msg_obj || !msg_obj->nodesetval ||
+          msg_obj->nodesetval->nodeNr == 0) {
+        out.push_back(n);
+        continue;
+      }
+      xmlNodePtr msg_node = msg_obj->nodesetval->nodeTab[0];
+
+      auto prop = [&](const char* attr) -> std::string {
+        xmlChar* v = xmlGetProp(msg_node, BAD_CAST attr);
+        if (!v) return {};
+        std::string s(reinterpret_cast<char*>(v));
+        xmlFree(v);
+        return s;
+      };
+      n.event_time  = prop("UtcTime");
+      n.property_op = prop("PropertyOperation");
+
+      auto fill_items = [&](const std::string& xpath_expr,
+                            std::map<std::string, std::string>& target) {
+        auto obj = doc.xpath(xpath_expr, msg_node);
+        if (!obj || !obj->nodesetval) return;
+        for (int j = 0; j < obj->nodesetval->nodeNr; ++j) {
+          xmlNodePtr it    = obj->nodesetval->nodeTab[j];
+          xmlChar*   name  = xmlGetProp(it, BAD_CAST "Name");
+          xmlChar*   value = xmlGetProp(it, BAD_CAST "Value");
+          if (name && value)
+            target[reinterpret_cast<char*>(name)] =
+              reinterpret_cast<char*>(value);
+          if (name)  xmlFree(name);
+          if (value) xmlFree(value);
+        }
+      };
+      fill_items(".//tt:Source/tt:SimpleItem", n.source);
+      fill_items(".//tt:Data/tt:SimpleItem",   n.data);
+
+      out.push_back(std::move(n));
+    }
+    return out;
+  }
+
+  const CameraConfig&       cfg_;
+  const EventCallback&      cb_;
+  const std::atomic<bool>&  running_;
+  RawRecorder*              raw_;      // nullable; not owned
+  bool                      verbose_;
+};
+
+}  // anonymous namespace
+
+// ============================================================
+// OnvifListener public methods
+// ============================================================
+OnvifListener::OnvifListener()  = default;
+OnvifListener::~OnvifListener() = default;
+
+void OnvifListener::add_camera(const CameraConfig& cfg) {
+  cameras_.push_back(cfg);
+}
+
+void OnvifListener::enable_raw_recording(const std::string& path) {
+  raw_path_ = path;
+}
+
+void OnvifListener::enable_verbose_logging() {
+  verbose_ = true;
+}
+
+void OnvifListener::run(EventCallback cb) {
+  running_ = true;
+
+  // Create raw recorder if a path was configured (lives for the duration of run())
+  std::unique_ptr<RawRecorder> raw_recorder;
+  if (!raw_path_.empty())
+    raw_recorder = std::make_unique<RawRecorder>(raw_path_);
+  RawRecorder* raw = raw_recorder.get();  // nullptr when disabled
+
+  // Build workers (heap-allocated so their address is stable across moves)
+  std::vector<std::unique_ptr<CameraWorker>> workers;
+  workers.reserve(cameras_.size());
+  for (const auto& cam : cameras_)
+    workers.push_back(
+      std::make_unique<CameraWorker>(cam, cb, running_, raw, verbose_));
+
+  // Launch one thread per camera
+  std::vector<std::thread> threads;
+  threads.reserve(workers.size());
+  for (auto& w : workers) {
+    CameraWorker* ptr = w.get();
+    threads.emplace_back([ptr] { ptr->run(); });
+  }
+
+  for (auto& t : threads)
+    t.join();
+}
+
+void OnvifListener::stop() {
+  running_ = false;
+}
+
+}  // namespace onvif

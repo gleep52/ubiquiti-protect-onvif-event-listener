@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dpkg:*)",
+      "Bash(apt-cache:*)",
+      "Bash(pkg-config:*)",
+      "Bash(make:*)",
+      "Bash(timeout 30 ./onvif_recorder:*)",
+      "Bash(timeout:*)",
+      "Bash(echo:*)",
+      "Bash(python3:*)",
+      "Bash(./test_detection_recorder:*)",
+      "Bash(ldd bazel-bin/onvif_recorder)",
+      "Bash(readelf -d bazel-bin/onvif_recorder | grep NEEDED)",
+      "Bash(curl --version 2>&1 | head -3)",
+      "Bash(apt-file list:*)",
+      "Bash(ar t:*)",
+      "Bash(find /usr/lib/x86_64-linux-gnu -name \"libgssapi_krb5.a\" 2>/dev/null; dpkg -L libkrb5-dev 2>/dev/null | grep \"\\\\.a$\")",
+      "Bash(nm -u /usr/lib/x86_64-linux-gnu/libpq.a 2>/dev/null | grep -v \"^$\" | head -30)",
+      "Bash(find /usr/lib -name \"libpgcommon*.a\" -o -name \"libpgport*.a\" 2>/dev/null; dpkg -l \"postgresql-server-dev*\" 2>&1 | grep \"^ii\")",
+      "Bash(nm -u /usr/lib/x86_64-linux-gnu/libcurl.a /usr/lib/x86_64-linux-gnu/libpq.a /usr/lib/x86_64-linux-gnu/libldap.a)",
+      "Bash(nm -u /usr/lib/x86_64-linux-gnu/libpq.a)",
+      "Bash(dpkg -L libssh-dev 2>/dev/null | grep \"\\\\.a$\"\necho \"---\"\ndpkg -L libgnutls28-dev 2>/dev/null | grep \"\\\\.a$\"\necho \"---\" \ndpkg -L libp11-kit-dev 2>/dev/null | grep \"\\\\.a$\")"
+    ]
+  }
+}

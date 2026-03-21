@@ -1,0 +1,18 @@
+[Unit]
+Description=ONVIF Detection Recorder
+After=network.target postgresql@14-protect.service unifi-protect.service
+Wants=postgresql@14-protect.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+Environment=ONVIF_DB_BACKEND=postgres
+ExecStart=/root/onvif_recorder
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/onvif-recorder.log
+StandardError=append:/var/log/onvif-recorder.log
+
+[Install]
+WantedBy=multi-user.target

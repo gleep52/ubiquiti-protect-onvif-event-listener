@@ -1,0 +1,112 @@
+#pragma once
+
+#include <atomic>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace onvif {
+
+// ---------------------------------------------------------------
+// Event delivered to the caller via EventCallback
+// ---------------------------------------------------------------
+struct OnvifEvent {
+    std::string camera_ip;
+    std::string camera_user;
+    std::string topic;          // e.g. "tns1:RuleEngine/CellMotionDetector/Motion"
+    std::string event_time;     // Camera-reported UTC timestamp
+    std::string property_op;   // "Initialized", "Changed", or "Deleted"
+    std::map<std::string, std::string> source;
+    std::map<std::string, std::string> data;
+};
+
+// ---------------------------------------------------------------
+// Camera credentials / address
+// ---------------------------------------------------------------
+struct CameraConfig {
+    std::string id;           ///< UUID from the cameras table (empty for SQLite-only use)
+    std::string mac;          ///< MAC address, uppercase no colons e.g. "FC5F49CA68D4"
+    std::string ip;
+    std::string user;
+    std::string password;
+    std::string snapshot_url;  ///< Optional HTTP URL used to capture a snapshot image
+    int retry_interval_sec{10};      ///< Seconds to wait before retrying a failed subscription
+    ///< Give up after this many consecutive failures (0 = unlimited)
+    int max_consecutive_failures{0};
+};
+
+using EventCallback = std::function<void(const OnvifEvent&)>;
+
+// ---------------------------------------------------------------
+// Library lifecycle -- call once from main() around all listeners
+// ---------------------------------------------------------------
+void global_init();
+void global_cleanup();
+
+// ---------------------------------------------------------------
+// OnvifListener
+//
+// Manages WS-PullPoint subscriptions for one or more cameras.
+// Not copyable or movable.
+//
+// Typical usage:
+//
+//   onvif::global_init();
+//   {
+//       onvif::OnvifListener listener;
+//       listener.add_camera({"192.168.1.108", "admin", "secret"});
+//       listener.add_camera({"192.168.1.109", "user",  "secret"});
+//
+//       // signal handler calls listener.stop()
+//       listener.run([](const onvif::OnvifEvent& ev) {
+//           // called from camera thread; must be thread-safe
+//           std::cout << ev.topic << '\n';
+//       });
+//   }
+//   onvif::global_cleanup();
+// ---------------------------------------------------------------
+class OnvifListener {
+ public:
+    OnvifListener();
+    ~OnvifListener();
+
+    OnvifListener(const OnvifListener&)            = delete;
+    OnvifListener& operator=(const OnvifListener&) = delete;
+
+    /// Register a camera before calling run().
+    void add_camera(const CameraConfig& cfg);
+
+    /// Enable raw HTTP recording. Every SOAP request and its response are
+    /// written as JSON Lines to @p path (one object per exchange). Must be
+    /// called before run(). Disabled when not called.
+    ///
+    /// Each line contains:
+    ///   timestamp, camera_ip, url, soap_action,
+    ///   request  (full SOAP XML string),
+    ///   response_status (HTTP code), response (full SOAP XML string)
+    void enable_raw_recording(const std::string& path);
+
+    /// Enable verbose logging to stderr. By default only errors and give-up
+    /// events are logged. With verbose enabled, lifecycle events (subscription
+    /// established, renewed, events received) are also printed.
+    /// Can also be enabled at runtime via the ONVIF_VERBOSE=1 env var.
+    void enable_verbose_logging();
+
+    /// Spawn one thread per camera. Invoke cb for every received event
+    /// (from the camera's own thread -- cb must be thread-safe).
+    /// Blocks until stop() is called and all threads have joined.
+    void run(EventCallback cb);
+
+    /// Signal all camera threads to stop. Safe to call from any thread
+    /// or signal handler; run() returns once all threads have joined.
+    void stop();
+
+ private:
+    std::atomic<bool>         running_{false};
+    std::vector<CameraConfig> cameras_;
+    std::string               raw_path_;   // empty = raw recording disabled
+    bool                      verbose_{false};
+};
+
+}  // namespace onvif

@@ -1,0 +1,82 @@
+config_setting(
+    name = "is_arm64",
+    constraint_values = ["@platforms//cpu:aarch64"],
+)
+
+cc_library(
+    name = "onvif_camera_emulator",
+    srcs = ["onvif_camera_emulator.cpp"],
+    hdrs = ["onvif_camera_emulator.hpp"],
+    deps = select({
+        ":is_arm64": ["@arm64_sysroot//:libmicrohttpd"],
+        "//conditions:default": ["@libmicrohttpd"],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "camera_emulators",
+    srcs = ["camera_emulators.cpp"],
+    hdrs = ["camera_emulators.hpp"],
+    deps = [":onvif_camera_emulator"],
+)
+
+filegroup(
+    name = "onvif_raw_log",
+    srcs = ["testdata/onvif_raw_20260219_085752.jsonl"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "test_onvif_listener",
+    srcs = ["test_onvif_listener.cpp"],
+    args = ["$(location //test:onvif_raw_log)"],
+    data = ["//test:onvif_raw_log"],
+    deps = [
+        "//:onvif_listener",
+        ":camera_emulators",
+        ":onvif_camera_emulator",
+    ],
+)
+
+cc_test(
+    name = "test_detection_recorder",
+    srcs = ["test_detection_recorder.cpp"],
+    data = [
+        "testdata/snapshot_108.jpg",
+        "testdata/snapshot_109.jpg",
+    ],
+    deps = [
+        "//:detection_recorder",
+        "//:ubv_thumbnail",
+        ":onvif_camera_emulator",
+    ],
+)
+
+cc_test(
+    name = "test_ubv_thumbnail",
+    srcs = ["test_ubv_thumbnail.cpp"],
+    data = [
+        "testdata/snapshot_108.jpg",
+        "testdata/snapshot_109.jpg",
+    ],
+    deps = ["//:ubv_thumbnail"],
+)
+
+filegroup(
+    name = "bench_onvif_raw_log",
+    srcs = ["testdata/bench_onvif.jsonl"],
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "bench_onvif_listener",
+    srcs = ["bench_onvif_listener.cpp"],
+    args = ["$(location //test:bench_onvif_raw_log)"],
+    data = ["//test:bench_onvif_raw_log"],
+    deps = [
+        "//:onvif_listener",
+        ":camera_emulators",
+        ":onvif_camera_emulator",
+    ],
+)
