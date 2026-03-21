@@ -1,12 +1,16 @@
 # ONVIF Event Recorder
 
-Listens to ONVIF WS-PullPoint event streams from UniFi cameras, and writes
-human/vehicle detection intervals to the UniFi Protect PostgreSQL database so
-they appear natively in the Protect UI.
+Bridges **third-party ONVIF cameras** into UniFi Protect. It listens to ONVIF
+WS-PullPoint event streams and writes human/vehicle detection intervals to the
+UniFi Protect PostgreSQL database so they appear natively in the Protect UI.
+
+> **Note:** This software is only needed for third-party cameras adopted into
+> UniFi Protect via the ONVIF integration. Native UniFi cameras have built-in
+> smart detection and do not require this tool.
 
 ---
 
-## Installation on Dream Router / Dream Machine
+## Installation on Dream Router / Dream Machine (third-party cameras only)
 
 ### Step 1 — Enable SSH on your UniFi device
 
