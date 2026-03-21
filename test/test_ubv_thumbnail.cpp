@@ -32,6 +32,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../ubv_thumbnail.hpp"

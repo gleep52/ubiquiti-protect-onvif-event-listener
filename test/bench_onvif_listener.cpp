@@ -96,7 +96,9 @@ int main(int argc, char* argv[]) {
       auto now = Clock::now();
       std::lock_guard<std::mutex> lk(mu);
       if (n == 1)                    t_start = now;
-      if (n >= target && !done) { t_end = now; done = true; cv.notify_one(); }
+      if (n >= target && !done) {
+        t_end = now; done = true; cv.notify_one();
+      }
     });
   });
 

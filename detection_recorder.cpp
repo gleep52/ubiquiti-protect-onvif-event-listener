@@ -228,7 +228,10 @@ struct SqliteBackend final : DetectionRecorder::IDbBackend {
     int rc = sqlite3_open(path.c_str(), &db_);
     if (rc != SQLITE_OK) {
       // Store error; db_ may still need closing
-      if (db_) { sqlite3_close(db_); db_ = nullptr; }
+      if (db_) {
+        sqlite3_close(db_);
+        db_ = nullptr;
+      }
       return;
     }
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);

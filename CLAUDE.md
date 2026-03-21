@@ -95,6 +95,35 @@ test/
 - Detection mapping: ONVIF `"Human"` → `"person"`, `"Vehicle"` → `"vehicle"`.
 - `"end"` must be double-quoted in SQL (reserved word).
 
+## Pre-push checklist
+
+Run these before every `git push` to keep the repo green:
+
+```bash
+# 1. Lint all source files (must be zero errors)
+python3 -m cpplint *.cpp *.hpp test/*.cpp test/*.hpp
+
+# 2. All tests pass
+bazel test //test:all
+
+# 3. Regenerate PGO profiles (keeps the optimised binary current)
+make pgo-bench-x86
+```
+
+> **Note:** these steps are a manual checklist for Claude to follow in conversation.
+> To enforce them automatically on every push, configure a git pre-push hook:
+>
+> ```bash
+> cat > .git/hooks/pre-push << 'EOF'
+> #!/bin/bash
+> set -e
+> python3 -m cpplint *.cpp *.hpp test/*.cpp test/*.hpp
+> ~/.local/bin/bazel test //test:all
+> make pgo-bench-x86
+> EOF
+> chmod +x .git/hooks/pre-push
+> ```
+
 ## Environment variables (runtime)
 
 | Variable | Default | Description |
