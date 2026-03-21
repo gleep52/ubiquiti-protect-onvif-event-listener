@@ -208,7 +208,9 @@ int main() {
     if (db_backend == onvif::DbBackend::PostgreSQL)
       cam_db.host = "/run/postgresql";
 
-    for (auto cam : unifi::load_cameras(cam_db)) {
+    auto cameras = unifi::load_cameras(cam_db);
+    unifi::enable_smart_detect(cameras, cam_db);
+    for (auto cam : cameras) {
       cam.max_consecutive_failures = 5;
       listener.add_camera(cam);
       det_rec.set_snapshot(cam);

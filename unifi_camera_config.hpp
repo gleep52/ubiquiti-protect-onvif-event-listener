@@ -26,4 +26,14 @@ struct DbConfig {
 /// Throws std::runtime_error on connection or query failure.
 std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db = {});
 
+/// For each camera in `ids`, ensure that smart detection is enabled in the
+/// Protect database.  Specifically, for any camera whose
+/// `featureFlags.smartDetectTypes` or `smartDetectSettings.objectTypes` is
+/// empty, sets both to ["person","vehicle"] and updates `updatedAt`.
+///
+/// This is idempotent — cameras already configured are not touched.
+/// Throws std::runtime_error on connection or query failure.
+void enable_smart_detect(const std::vector<onvif::CameraConfig>& cameras,
+                         const DbConfig& db = {});
+
 }  // namespace unifi

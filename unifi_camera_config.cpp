@@ -118,4 +118,65 @@ std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db) {
   return cameras;
 }
 
+// ---------------------------------------------------------------------------
+
+void enable_smart_detect(const std::vector<onvif::CameraConfig>& cameras,
+                         const DbConfig& db) {
+  if (cameras.empty()) return;
+
+  std::string connstr =
+    "host="    + db.host   +
+    " port="   + std::to_string(db.port) +
+    " dbname=" + db.dbname +
+    " user="   + db.user;
+  if (!db.password.empty())
+    connstr += " password=" + db.password;
+
+  PGconn* conn = PQconnectdb(connstr.c_str());
+  if (PQstatus(conn) != CONNECTION_OK) {
+    std::string err = PQerrorMessage(conn);
+    PQfinish(conn);
+    throw std::runtime_error("unifi::enable_smart_detect: " + err);
+  }
+
+  // For each camera: if either smartDetectTypes (featureFlags) or objectTypes
+  // (smartDetectSettings) is missing or empty, fill both with person+vehicle.
+  // Cast via ::jsonb so jsonb_set works even though the columns are json type.
+  const char* sql =
+    "UPDATE cameras "
+    "SET \"featureFlags\" = jsonb_set("
+    "      \"featureFlags\"::jsonb,"
+    "      '{smartDetectTypes}',"
+    "      '[\"person\",\"vehicle\"]'::jsonb"
+    "    )::json,"
+    "    \"smartDetectSettings\" = jsonb_set("
+    "      \"smartDetectSettings\"::jsonb,"
+    "      '{objectTypes}',"
+    "      '[\"person\",\"vehicle\"]'::jsonb"
+    "    )::json,"
+    "    \"updatedAt\" = NOW() "
+    "WHERE id = $1 "
+    "  AND ("
+    "    (\"featureFlags\"::jsonb -> 'smartDetectTypes') IS NULL"
+    "    OR (\"featureFlags\"::jsonb -> 'smartDetectTypes') = '[]'::jsonb"
+    "    OR (\"smartDetectSettings\"::jsonb -> 'objectTypes') IS NULL"
+    "    OR (\"smartDetectSettings\"::jsonb -> 'objectTypes') = '[]'::jsonb"
+    "  )";
+
+  for (const auto& cam : cameras) {
+    const char* params[1] = { cam.id.c_str() };
+    PGresult* res = PQexecParams(conn, sql, 1, nullptr, params,
+                                 nullptr, nullptr, 0);
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+      std::string err = PQresultErrorMessage(res);
+      PQclear(res);
+      PQfinish(conn);
+      throw std::runtime_error("unifi::enable_smart_detect update: " + err);
+    }
+    PQclear(res);
+  }
+
+  PQfinish(conn);
+}
+
 }  // namespace unifi
