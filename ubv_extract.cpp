@@ -86,9 +86,11 @@ int main(int argc, char** argv) {
   if (frames.empty()) return 0;
 
   // -- connect to UniFi Protect PostgreSQL ---------------------------------
-  const char* connstr =
-    "host=192.168.1.1 port=5433 dbname=unifi-protect user=postgres";
-  PGconn* conn = PQconnectdb(connstr);
+  const char* db_host = std::getenv("ONVIF_DB_HOST");
+  std::string connstr =
+    std::string("host=") + (db_host ? db_host : "127.0.0.1") +
+    " port=5433 dbname=unifi-protect user=postgres";
+  PGconn* conn = PQconnectdb(connstr.c_str());
   if (PQstatus(conn) != CONNECTION_OK) {
     std::cerr << "PostgreSQL connect failed: " << PQerrorMessage(conn)
               << "  (will use raw timestamps)\n";

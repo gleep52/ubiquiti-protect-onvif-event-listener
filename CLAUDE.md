@@ -101,6 +101,7 @@ test/
 |---|---|---|
 | `ONVIF_DB_BACKEND` | `sqlite` | `sqlite` or `postgres` |
 | `ONVIF_DB_CONN` | `onvif_detections.db` | SQLite path or libpq conninfo |
+| `ONVIF_DB_HOST` | `127.0.0.1` | Host for the Protect PostgreSQL camera DB (postgres backend defaults to Unix socket `/run/postgresql`) |
 | `ONVIF_UBV_DIR` | `thumbnails` | Directory for UBV thumbnail files (SQLite only) |
 | `ONVIF_PRE_BUFFER_SEC` | `2` | Seconds before first detection event |
 | `ONVIF_POST_BUFFER_SEC` | `2` | Seconds after last detection event |

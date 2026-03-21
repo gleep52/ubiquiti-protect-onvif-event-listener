@@ -9,7 +9,7 @@ namespace unifi {
 
 /// Connection parameters for the UniFi Protect PostgreSQL instance.
 struct DbConfig {
-  std::string host     = "192.168.1.1";
+  std::string host     = "127.0.0.1";
   int         port     = 5433;
   std::string dbname   = "unifi-protect";
   std::string user     = "postgres";

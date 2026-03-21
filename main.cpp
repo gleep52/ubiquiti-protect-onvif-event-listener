@@ -145,6 +145,7 @@ int main() {
   //                      (default: "thumbnails"; ignored for postgres)
   const char* env_backend    = std::getenv("ONVIF_DB_BACKEND");
   const char* env_conn       = std::getenv("ONVIF_DB_CONN");
+  const char* env_db_host    = std::getenv("ONVIF_DB_HOST");
   const char* env_ubv_dir    = std::getenv("ONVIF_UBV_DIR");
   const char* env_pre_buf    = std::getenv("ONVIF_PRE_BUFFER_SEC");
   const char* env_post_buf   = std::getenv("ONVIF_POST_BUFFER_SEC");
@@ -178,6 +179,7 @@ int main() {
             << "DB backend  : " << (db_backend == onvif::DbBackend::PostgreSQL
                                     ? "postgres" : "sqlite") << '\n'
             << "DB conn     : " << db_conn       << '\n'
+            << "DB host     : " << (env_db_host ? env_db_host : "(default)") << '\n'
             << "Pre-buffer  : " << pre_buf_sec   << " s\n"
             << "Post-buffer : " << post_buf_sec  << " s\n"
             << "Verbose     : " << (verbose ? "yes" : "no") << '\n';
@@ -201,11 +203,14 @@ int main() {
     if (!thumbs_dir.empty())
       det_rec.set_ubv_dir(thumbs_dir);
 
-    // Camera configs are loaded from the same Protect database.
-    // When using the postgres backend we're running on the device, so use
-    // the local Unix socket rather than the TCP address in DbConfig defaults.
+    // Camera configs are loaded from the UniFi Protect database.
+    // ONVIF_DB_HOST overrides the host (default: 127.0.0.1).
+    // When using the postgres backend without an explicit override, use the
+    // local Unix socket so no TCP listener is required on the router.
     unifi::DbConfig cam_db;
-    if (db_backend == onvif::DbBackend::PostgreSQL)
+    if (env_db_host)
+      cam_db.host = env_db_host;
+    else if (db_backend == onvif::DbBackend::PostgreSQL)
       cam_db.host = "/run/postgresql";
 
     auto cameras = unifi::load_cameras(cam_db);

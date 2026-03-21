@@ -111,7 +111,7 @@ ONVIF `"Human"` → SQLite `"person"`;  ONVIF `"Vehicle"` → SQLite `"vehicle"`
 - All XML documents are freed after each parse; no persistent DOM state.
 
 **libpq** (`unifi_camera_config.cpp`)
-- Single synchronous connection to `postgres://192.168.1.1:5433/unifi-protect`.
+- Single synchronous connection to `postgres://127.0.0.1:5433/unifi-protect` by default (override with `ONVIF_DB_HOST`).
 - Queries `cameras` table; extracts `host` (IP) and credentials from the
   `thirdPartyCameraInfo` JSONB column using `PQgetvalue`.
 
