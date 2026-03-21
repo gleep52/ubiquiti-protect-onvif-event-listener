@@ -49,6 +49,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
@@ -250,8 +251,10 @@ class SnapshotSyntheticEmulator : public OnvifCameraEmulator {
 // Load a binary file into a byte vector.
 static std::vector<unsigned char> load_file(const std::string& path) {
   std::ifstream f(path, std::ios::binary | std::ios::ate);
-  if (!f.is_open())
-    throw std::runtime_error("Cannot open: " + path);
+  if (!f.is_open()) {
+    std::fprintf(stderr, "Fatal: Cannot open: %s\n", path.c_str());
+    std::abort();
+  }
   auto sz = static_cast<std::size_t>(f.tellg());
   f.seekg(0);
   std::vector<unsigned char> buf(sz);

@@ -4,6 +4,8 @@ build --cxxopt=-Wextra
 build --cxxopt=-O2
 build --cxxopt=-pthread
 build --linkopt=-pthread
+build --cxxopt=-fno-exceptions
+build --cxxopt=-fno-rtti
 
 # Cross-compile to arm64: bazel build --config=arm64 //:onvif_recorder
 # Packages are downloaded on first use and cached in Bazel's output base.

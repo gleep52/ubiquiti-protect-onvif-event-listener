@@ -14,7 +14,8 @@
 
 #include "onvif_camera_emulator.hpp"
 
-#include <stdexcept>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <cstring>
 
@@ -39,12 +40,18 @@ void OnvifCameraEmulator::start() {
         MHD_OPTION_NOTIFY_COMPLETED, &on_completed, this,
         MHD_OPTION_END);
 
-    if (!daemon_)
-        throw std::runtime_error("Failed to start MHD daemon for " + real_ip_);
+    if (!daemon_) {
+        std::fprintf(stderr, "Fatal: Failed to start MHD daemon for %s\n",
+                     real_ip_.c_str());
+        std::abort();
+    }
 
     const auto* info = MHD_get_daemon_info(daemon_, MHD_DAEMON_INFO_BIND_PORT);
-    if (!info)
-        throw std::runtime_error("Failed to query daemon port for " + real_ip_);
+    if (!info) {
+        std::fprintf(stderr, "Fatal: Failed to query daemon port for %s\n",
+                     real_ip_.c_str());
+        std::abort();
+    }
 
     port_ = info->port;
 }

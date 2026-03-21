@@ -16,7 +16,8 @@
 
 #include <algorithm>
 #include <fstream>
-#include <stdexcept>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -151,8 +152,10 @@ std::pair<int, std::string> next_cycle(
 RecordedSession RecordedSession::from_jsonl(const std::string& path,
                                             const std::string& camera_ip) {
   std::ifstream f(path);
-  if (!f.is_open())
-    throw std::runtime_error("Cannot open raw log: " + path);
+  if (!f.is_open()) {
+    std::fprintf(stderr, "Fatal: Cannot open raw log: %s\n", path.c_str());
+    std::abort();
+  }
 
   RecordedSession session;
   std::string line;
@@ -170,10 +173,15 @@ RecordedSession RecordedSession::from_jsonl(const std::string& path,
     else if (tail == "RenewRequest")                       session.renew.push_back(ex);
   }
 
-  if (session.create_sub.empty())
-    throw std::runtime_error("No CreatePullPointSubscription data for " + camera_ip);
-  if (session.pull.empty())
-    throw std::runtime_error("No PullMessages data for " + camera_ip);
+  if (session.create_sub.empty()) {
+    std::fprintf(stderr, "Fatal: No CreatePullPointSubscription data for %s\n",
+                 camera_ip.c_str());
+    std::abort();
+  }
+  if (session.pull.empty()) {
+    std::fprintf(stderr, "Fatal: No PullMessages data for %s\n", camera_ip.c_str());
+    std::abort();
+  }
 
   return session;
 }
