@@ -18,6 +18,9 @@
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+
 namespace ubv {
 
 // ---------------------------------------------------------------------------
@@ -50,23 +53,23 @@ struct Frame {
 };
 
 /// Decode all JPEG thumbnail frames from a UBV file.
-/// Throws std::runtime_error on I/O or format errors.
-std::vector<Frame> decode(const std::string& path);
+/// Returns error Status on I/O or format errors.
+absl::StatusOr<std::vector<Frame>> decode(const std::string& path);
 
 /// Decode the single JPEG frame whose timestamp matches @p timestamp_ms.
 /// Scans sequentially and returns as soon as the frame is found.
-/// Throws std::runtime_error if not found or on I/O error.
-Frame decode_one(const std::string& path, uint64_t timestamp_ms);
+/// Returns error Status if not found or on I/O error.
+absl::StatusOr<Frame> decode_one(const std::string& path, uint64_t timestamp_ms);
 
 /// Encode @p frames into a UBV file at @p path (overwritten if it exists).
-/// Throws std::runtime_error if @p frames is empty or on I/O error.
-void encode(const std::string& path, const std::vector<Frame>& frames);
+/// Returns error Status if @p frames is empty or on I/O error.
+absl::Status encode(const std::string& path, const std::vector<Frame>& frames);
 
 /// Append a single frame to a UBV file at @p path.
 /// If the file does not exist (or is empty) it is created with a fresh
 /// file-header record first.  Subsequent calls append only the meta+JPEG
 /// record pair, making this suitable for a continuously-growing thumbnail log.
-/// Throws std::runtime_error on I/O error.
-void append(const std::string& path, const Frame& frame);
+/// Returns error Status on I/O error.
+absl::Status append(const std::string& path, const Frame& frame);
 
 }  // namespace ubv

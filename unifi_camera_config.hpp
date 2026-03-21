@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "onvif_listener.hpp"
 
 namespace unifi {
@@ -37,8 +39,9 @@ struct DbConfig {
 /// `isAdopted = true`, extracting the IP from `host` and credentials from
 /// the `thirdPartyCameraInfo` JSONB column.
 ///
-/// Throws std::runtime_error on connection or query failure.
-std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db = {});
+/// Returns error Status on connection or query failure.
+absl::StatusOr<std::vector<onvif::CameraConfig>> load_cameras(
+    const DbConfig& db = {});
 
 /// For each camera in `ids`, ensure that smart detection is enabled in the
 /// Protect database.  Specifically, for any camera whose
@@ -46,8 +49,9 @@ std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db = {});
 /// empty, sets both to ["person","vehicle"] and updates `updatedAt`.
 ///
 /// This is idempotent — cameras already configured are not touched.
-/// Throws std::runtime_error on connection or query failure.
-void enable_smart_detect(const std::vector<onvif::CameraConfig>& cameras,
-                         const DbConfig& db = {});
+/// Returns error Status on connection or query failure.
+absl::Status enable_smart_detect(
+    const std::vector<onvif::CameraConfig>& cameras,
+    const DbConfig& db = {});
 
 }  // namespace unifi

@@ -1,5 +1,15 @@
 workspace(name = "onvif")
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# Abseil C++ — provides absl::Status / absl::StatusOr.
+http_archive(
+    name = "com_google_absl",
+    sha256 = "f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3",
+    strip_prefix = "abseil-cpp-20240722.0",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz"],
+)
+
 load("//bazel:pkg_config.bzl", "pkg_config_library")
 load("//bazel:arm64_sysroot.bzl", "arm64_sysroot")
 

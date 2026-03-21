@@ -17,10 +17,12 @@
 #include <array>
 #include <cstring>
 #include <fstream>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 
 namespace ubv {
 
@@ -61,7 +63,9 @@ static void put_be64(uint8_t* p, uint64_t v) {
 
 // ---------------------------------------------------------------------------
 // Read one complete record from @p in.
-// Returns false (without throwing) at clean EOF; throws on partial data.
+// Sets eof=true and returns OkStatus on clean EOF.
+// Returns error Status on partial/corrupt data.
+// Sets eof=false on successful read.
 // ---------------------------------------------------------------------------
 struct Record {
   uint32_t             type;
@@ -70,11 +74,15 @@ struct Record {
   std::vector<uint8_t> payload;
 };
 
-static bool read_record(std::ifstream& in, Record& out) {
+static absl::Status read_record(std::ifstream& in, Record& out, bool& eof) {
+  eof = false;
   uint8_t hdr[RECORD_HEADER_SIZE];
   if (!in.read(reinterpret_cast<char*>(hdr), RECORD_HEADER_SIZE)) {
-    if (in.eof() && in.gcount() == 0) return false;  // clean EOF
-    throw std::runtime_error("ubv: truncated record header");
+    if (in.eof() && in.gcount() == 0) {
+      eof = true;
+      return absl::OkStatus();
+    }
+    return absl::InternalError("ubv: truncated record header");
   }
 
   out.type         = be32(hdr + 0);
@@ -85,13 +93,16 @@ static bool read_record(std::ifstream& in, Record& out) {
   out.payload.resize(n);
   if (n > 0) {
     in.read(reinterpret_cast<char*>(out.payload.data()), n);
-    if (in.gcount() < static_cast<std::streamsize>(n))
-      return false;  // truncated at end of file -- stop cleanly
+    if (in.gcount() < static_cast<std::streamsize>(n)) {
+      // truncated at end of file -- stop cleanly
+      eof = true;
+      return absl::OkStatus();
+    }
   }
 
   uint8_t trailer[4];
   if (!in.read(reinterpret_cast<char*>(trailer), 4))
-    throw std::runtime_error("ubv: truncated record trailer");
+    return absl::InternalError("ubv: truncated record trailer");
 
   const uint32_t back_ref = be32(trailer);
   if (back_ref == RECORD_HEADER_SIZE + n) {
@@ -109,12 +120,12 @@ static bool read_record(std::ifstream& in, Record& out) {
       }
     }
   } else {
-    throw std::runtime_error(
+    return absl::InternalError(
       "ubv: unexpected back_ref " + std::to_string(back_ref)
       + " (expected " + std::to_string(RECORD_HEADER_SIZE + n) + ')');
   }
 
-  return true;
+  return absl::OkStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -141,14 +152,18 @@ static void write_record(std::ofstream& out,
 // ---------------------------------------------------------------------------
 // decode -- extract all JPEG frames
 // ---------------------------------------------------------------------------
-std::vector<Frame> decode(const std::string& path) {
+absl::StatusOr<std::vector<Frame>> decode(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in.is_open())
-    throw std::runtime_error("ubv::decode: cannot open " + path);
+    return absl::InternalError("ubv::decode: cannot open " + path);
 
   std::vector<Frame> frames;
   Record rec;
-  while (read_record(in, rec)) {
+  bool eof = false;
+  while (true) {
+    absl::Status st = read_record(in, rec, eof);
+    if (!st.ok()) return st;
+    if (eof) break;
     if (rec.type != TYPE_JPEG) continue;
     if (rec.payload.size() < 2
         || rec.payload[0] != 0xff || rec.payload[1] != 0xd8)
@@ -161,21 +176,25 @@ std::vector<Frame> decode(const std::string& path) {
 // ---------------------------------------------------------------------------
 // decode_one -- find a single frame by timestamp
 // ---------------------------------------------------------------------------
-Frame decode_one(const std::string& path, uint64_t timestamp_ms) {
+absl::StatusOr<Frame> decode_one(const std::string& path, uint64_t timestamp_ms) {
   std::ifstream in(path, std::ios::binary);
   if (!in.is_open())
-    throw std::runtime_error("ubv::decode_one: cannot open " + path);
+    return absl::InternalError("ubv::decode_one: cannot open " + path);
 
   Record rec;
-  while (read_record(in, rec)) {
+  bool eof = false;
+  while (true) {
+    absl::Status st = read_record(in, rec, eof);
+    if (!st.ok()) return st;
+    if (eof) break;
     if (rec.type != TYPE_JPEG)             continue;
     if (rec.timestamp_ms != timestamp_ms)  continue;
     if (rec.payload.size() < 2
         || rec.payload[0] != 0xff || rec.payload[1] != 0xd8)
       continue;
-    return {rec.timestamp_ms, std::move(rec.payload)};
+    return Frame{rec.timestamp_ms, std::move(rec.payload)};
   }
-  throw std::runtime_error(
+  return absl::NotFoundError(
     "ubv::decode_one: no frame with timestamp "
     + std::to_string(timestamp_ms) + " in " + path);
 }
@@ -183,13 +202,13 @@ Frame decode_one(const std::string& path, uint64_t timestamp_ms) {
 // ---------------------------------------------------------------------------
 // encode -- write frames into a new UBV file
 // ---------------------------------------------------------------------------
-void encode(const std::string& path, const std::vector<Frame>& frames) {
+absl::Status encode(const std::string& path, const std::vector<Frame>& frames) {
   if (frames.empty())
-    throw std::runtime_error("ubv::encode: no frames provided");
+    return absl::InvalidArgumentError("ubv::encode: no frames provided");
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out.is_open())
-    throw std::runtime_error("ubv::encode: cannot open " + path);
+    return absl::InternalError("ubv::encode: cannot open " + path);
 
   const uint64_t first_ts = frames.front().timestamp_ms;
 
@@ -208,13 +227,14 @@ void encode(const std::string& path, const std::vector<Frame>& frames) {
   }
 
   if (!out.flush())
-    throw std::runtime_error("ubv::encode: write error on " + path);
+    return absl::InternalError("ubv::encode: write error on " + path);
+  return absl::OkStatus();
 }
 
 // ---------------------------------------------------------------------------
 // append -- add one frame to an existing UBV file (create if new)
 // ---------------------------------------------------------------------------
-void append(const std::string& path, const Frame& frame) {
+absl::Status append(const std::string& path, const Frame& frame) {
   // Determine whether the file already exists and has content.
   bool is_new = true;
   {
@@ -230,7 +250,7 @@ void append(const std::string& path, const Frame& frame) {
     // Create file and write the file-header record first.
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out.is_open())
-      throw std::runtime_error("ubv::append: cannot create " + path);
+      return absl::InternalError("ubv::append: cannot create " + path);
 
     write_record(out, TYPE_FILE_HEADER, CODEC_META, frame.timestamp_ms,
                  file_hdr_payload, sizeof(file_hdr_payload));
@@ -240,12 +260,12 @@ void append(const std::string& path, const Frame& frame) {
                  frame.jpeg.data(), static_cast<uint32_t>(frame.jpeg.size()));
 
     if (!out.flush())
-      throw std::runtime_error("ubv::append: write error on " + path);
+      return absl::InternalError("ubv::append: write error on " + path);
   } else {
     // Append a meta + JPEG pair to the existing file.
     std::ofstream out(path, std::ios::binary | std::ios::app);
     if (!out.is_open())
-      throw std::runtime_error("ubv::append: cannot open for append " + path);
+      return absl::InternalError("ubv::append: cannot open for append " + path);
 
     write_record(out, TYPE_META, CODEC_META, frame.timestamp_ms,
                  meta_payload, sizeof(meta_payload));
@@ -253,8 +273,9 @@ void append(const std::string& path, const Frame& frame) {
                  frame.jpeg.data(), static_cast<uint32_t>(frame.jpeg.size()));
 
     if (!out.flush())
-      throw std::runtime_error("ubv::append: write error on " + path);
+      return absl::InternalError("ubv::append: write error on " + path);
   }
+  return absl::OkStatus();
 }
 
 }  // namespace ubv

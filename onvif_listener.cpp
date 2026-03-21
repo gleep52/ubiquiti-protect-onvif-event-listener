@@ -39,11 +39,13 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 
 namespace onvif {
 
@@ -148,10 +150,12 @@ std::string json_str(const std::string& s) {
 // -------------------------------------------------------
 class RawRecorder {
  public:
-  explicit RawRecorder(const std::string& path) {
-    file_.open(path, std::ios::app);
-    if (!file_.is_open())
-      throw std::runtime_error("Cannot open raw recording file: " + path);
+  static absl::StatusOr<std::unique_ptr<RawRecorder>> Create(
+      const std::string& path) {
+    auto r = std::unique_ptr<RawRecorder>(new RawRecorder(path));
+    if (!r->file_.is_open())
+      return absl::InternalError("Cannot open raw recording file: " + path);
+    return r;
   }
 
   // Record one complete request/response exchange.
@@ -178,6 +182,10 @@ class RawRecorder {
   }
 
  private:
+  explicit RawRecorder(const std::string& path) {
+    file_.open(path, std::ios::app);
+  }
+
   std::ofstream file_;
   std::mutex    mu_;
 };
@@ -275,13 +283,13 @@ size_t curl_write_cb(void* ptr, size_t sz, size_t nmemb, std::string* out) {
   return sz * nmemb;
 }
 
-HttpResponse soap_post(
+absl::StatusOr<HttpResponse> soap_post(
   const std::string& url,
   const std::string& body,
   const std::string& action,
   int timeout_sec = 30) {
   CURL* c = curl_easy_init();
-  if (!c) throw std::runtime_error("curl_easy_init failed");
+  if (!c) return absl::InternalError("curl_easy_init failed");
 
   HttpResponse resp;
 
@@ -308,7 +316,7 @@ HttpResponse soap_post(
 
   if (rc != CURLE_OK) {
     curl_easy_cleanup(c);
-    throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(rc));
+    return absl::InternalError(std::string("curl: ") + curl_easy_strerror(rc));
   }
 
   long code = 0;  // NOLINT(runtime/int)
@@ -325,15 +333,18 @@ struct XmlDoc {
   xmlDocPtr          doc{nullptr};
   xmlXPathContextPtr ctx{nullptr};
 
-  explicit XmlDoc(const std::string& xml) {
-    doc = xmlParseDoc(reinterpret_cast<const xmlChar*>(xml.c_str()));
-    if (!doc) throw std::runtime_error("XML parse error");
-    ctx = xmlXPathNewContext(doc);
-    if (!ctx) {
-      xmlFreeDoc(doc);
-      throw std::runtime_error("XPath ctx error");
+  static absl::StatusOr<XmlDoc> Create(const std::string& xml) {
+    XmlDoc xd;
+    xd.doc = xmlParseDoc(reinterpret_cast<const xmlChar*>(xml.c_str()));
+    if (!xd.doc) return absl::InternalError("XML parse error");
+    xd.ctx = xmlXPathNewContext(xd.doc);
+    if (!xd.ctx) {
+      xmlFreeDoc(xd.doc);
+      xd.doc = nullptr;
+      return absl::InternalError("XPath ctx error");
     }
-    register_ns(ctx);
+    register_ns(xd.ctx);
+    return xd;
   }
 
   ~XmlDoc() {
@@ -341,8 +352,23 @@ struct XmlDoc {
     if (doc) xmlFreeDoc(doc);
   }
 
+  XmlDoc() = default;
   XmlDoc(const XmlDoc&)            = delete;
   XmlDoc& operator=(const XmlDoc&) = delete;
+
+  XmlDoc(XmlDoc&& o) noexcept : doc(o.doc), ctx(o.ctx) {
+    o.doc = nullptr;
+    o.ctx = nullptr;
+  }
+  XmlDoc& operator=(XmlDoc&& o) noexcept {
+    if (this != &o) {
+      if (ctx) xmlXPathFreeContext(ctx);
+      if (doc) xmlFreeDoc(doc);
+      doc = o.doc; ctx = o.ctx;
+      o.doc = nullptr; o.ctx = nullptr;
+    }
+    return *this;
+  }
 
   static void register_ns(xmlXPathContextPtr c) {
     xmlXPathRegisterNs(c, BAD_CAST "s",
@@ -427,53 +453,74 @@ class CameraWorker {
     int consecutive_failures = 0;
 
     while (running_) {
-      try {
-        std::string sub_url = create_subscription();
-        if (sub_url.empty()) {
-          ++consecutive_failures;
-          if (max_failures > 0 && consecutive_failures >= max_failures) {
-            log("giving up after " + std::to_string(consecutive_failures) +
-                " consecutive subscription failures"
-                " -- camera may not support ONVIF pull-point events");
-            return;
-          }
-          log("failed to get subscription URL, retrying in " +
-              std::to_string(cfg_.retry_interval_sec) + "s" +
-              (max_failures > 0 ? " (" + std::to_string(consecutive_failures) +
-               "/" + std::to_string(max_failures) + ")" : ""));
-          sleep_interruptible(cfg_.retry_interval_sec);
-          continue;
-        }
-
-        // Successful subscription -- reset the failure counter.
-        consecutive_failures = 0;
-        vlog("subscription -> " + sub_url);
-
-        auto renew_at =
-          std::chrono::steady_clock::now() + std::chrono::seconds(90);
-
-        while (running_) {
-          if (std::chrono::steady_clock::now() >= renew_at) {
-            renew(sub_url);
-            renew_at = std::chrono::steady_clock::now()
-                       + std::chrono::seconds(90);
-          }
-          pull(sub_url);
-        }
-      } catch (const std::exception& e) {
+      auto sub_or = create_subscription();
+      if (!sub_or.ok()) {
         ++consecutive_failures;
         if (max_failures > 0 && consecutive_failures >= max_failures) {
           log(std::string("giving up after ") +
               std::to_string(consecutive_failures) +
               " consecutive failures -- camera may not support ONVIF pull-point events"
-              " (last error: " + e.what() + ")");
+              " (last error: " + std::string(sub_or.status().message()) + ")");
           return;
         }
-        log(std::string("error: ") + e.what() +
+        log(std::string("error: ") + std::string(sub_or.status().message()) +
             ", reconnecting in " + std::to_string(cfg_.retry_interval_sec) + "s" +
             (max_failures > 0 ? " (" + std::to_string(consecutive_failures) +
              "/" + std::to_string(max_failures) + ")" : ""));
         sleep_interruptible(cfg_.retry_interval_sec);
+        continue;
+      }
+
+      const std::string& sub_url = *sub_or;
+      if (sub_url.empty()) {
+        ++consecutive_failures;
+        if (max_failures > 0 && consecutive_failures >= max_failures) {
+          log("giving up after " + std::to_string(consecutive_failures) +
+              " consecutive subscription failures"
+              " -- camera may not support ONVIF pull-point events");
+          return;
+        }
+        log("failed to get subscription URL, retrying in " +
+            std::to_string(cfg_.retry_interval_sec) + "s" +
+            (max_failures > 0 ? " (" + std::to_string(consecutive_failures) +
+             "/" + std::to_string(max_failures) + ")" : ""));
+        sleep_interruptible(cfg_.retry_interval_sec);
+        continue;
+      }
+
+      // Successful subscription -- reset the failure counter.
+      consecutive_failures = 0;
+      vlog("subscription -> " + sub_url);
+
+      auto renew_at =
+        std::chrono::steady_clock::now() + std::chrono::seconds(90);
+
+      bool inner_ok = true;
+      while (running_ && inner_ok) {
+        if (std::chrono::steady_clock::now() >= renew_at) {
+          absl::Status rs = renew(sub_url);
+          if (!rs.ok())
+            log("renew error: " + std::string(rs.message()));
+          renew_at = std::chrono::steady_clock::now()
+                     + std::chrono::seconds(90);
+        }
+        absl::Status ps = pull(sub_url);
+        if (!ps.ok()) {
+          ++consecutive_failures;
+          if (max_failures > 0 && consecutive_failures >= max_failures) {
+            log(std::string("giving up after ") +
+                std::to_string(consecutive_failures) +
+                " consecutive failures -- camera may not support ONVIF pull-point events"
+                " (last error: " + std::string(ps.message()) + ")");
+            return;
+          }
+          log(std::string("error: ") + std::string(ps.message()) +
+              ", reconnecting in " + std::to_string(cfg_.retry_interval_sec) + "s" +
+              (max_failures > 0 ? " (" + std::to_string(consecutive_failures) +
+               "/" + std::to_string(max_failures) + ")" : ""));
+          sleep_interruptible(cfg_.retry_interval_sec);
+          inner_ok = false;
+        }
       }
     }
     vlog("stopped");
@@ -498,19 +545,20 @@ class CameraWorker {
   }
 
   // soap_post wrapper: records the exchange if raw recording is enabled.
-  HttpResponse soap_post_r(const std::string& url,
-                           const std::string& body,
-                           const std::string& action,
-                           int timeout_sec) {
-    auto resp = soap_post(url, body, action, timeout_sec);
+  absl::StatusOr<HttpResponse> soap_post_r(const std::string& url,
+                                            const std::string& body,
+                                            const std::string& action,
+                                            int timeout_sec) {
+    auto resp_or = soap_post(url, body, action, timeout_sec);
+    if (!resp_or.ok()) return resp_or;
     if (raw_)
       raw_->record(cfg_.ip, url, action, body,
-                   resp.status_code, resp.body);
-    return resp;
+                   resp_or->status_code, resp_or->body);
+    return resp_or;
   }
 
-  // CreatePullPointSubscription -> subscription URL
-  std::string create_subscription() {
+  // CreatePullPointSubscription -> subscription URL (empty string on HTTP error)
+  absl::StatusOr<std::string> create_subscription() {
     static const char* ACTION =
       "http://www.onvif.org/ver10/events/wsdl/EventPortType/"
       "CreatePullPointSubscriptionRequest";
@@ -521,27 +569,28 @@ class CameraWorker {
       "    </tev:CreatePullPointSubscription>\n";
 
     auto soap = build_soap(cfg_.user, cfg_.password, body, event_url(), ACTION);
-    auto resp = soap_post_r(event_url(), soap, ACTION, 20);
+    auto resp_or = soap_post_r(event_url(), soap, ACTION, 20);
+    if (!resp_or.ok()) return resp_or.status();
 
+    const HttpResponse& resp = *resp_or;
     if (resp.status_code != 200) {
       vlog("CreatePullPointSubscription HTTP " +
            std::to_string(resp.status_code) +
            ": " + resp.body.substr(0, 300));
-      return {};
+      return std::string{};
     }
 
-    try {
-      XmlDoc doc(resp.body);
-      return XmlDoc::trim(
-        doc.text("//*[local-name()='SubscriptionReference']"
-                 "/*[local-name()='Address']"));
-    } catch (const std::exception& e) {
-      log(std::string("parse sub URL: ") + e.what());
-      return {};
+    auto doc_or = XmlDoc::Create(resp.body);
+    if (!doc_or.ok()) {
+      log(std::string("parse sub URL: ") + std::string(doc_or.status().message()));
+      return std::string{};
     }
+    return XmlDoc::trim(
+      doc_or->text("//*[local-name()='SubscriptionReference']"
+                   "/*[local-name()='Address']"));
   }
 
-  void renew(const std::string& sub_url) {
+  absl::Status renew(const std::string& sub_url) {
     static const char* ACTION =
       "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest";
 
@@ -550,19 +599,17 @@ class CameraWorker {
       "      <wsnt:TerminationTime>PT120S</wsnt:TerminationTime>\n"
       "    </wsnt:Renew>\n";
 
-    try {
-      auto soap = build_soap(cfg_.user, cfg_.password, body, sub_url, ACTION);
-      auto resp = soap_post_r(sub_url, soap, ACTION, 15);
-      if (resp.status_code == 200)
-        vlog("subscription renewed");
-      else
-        log("renew HTTP " + std::to_string(resp.status_code));
-    } catch (const std::exception& e) {
-      log(std::string("renew error: ") + e.what());
-    }
+    auto soap = build_soap(cfg_.user, cfg_.password, body, sub_url, ACTION);
+    auto resp_or = soap_post_r(sub_url, soap, ACTION, 15);
+    if (!resp_or.ok()) return resp_or.status();
+    if (resp_or->status_code == 200)
+      vlog("subscription renewed");
+    else
+      log("renew HTTP " + std::to_string(resp_or->status_code));
+    return absl::OkStatus();
   }
 
-  void pull(const std::string& sub_url) {
+  absl::Status pull(const std::string& sub_url) {
     static const char* ACTION =
       "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription/"
       "PullMessagesRequest";
@@ -575,10 +622,12 @@ class CameraWorker {
 
     auto soap = build_soap(cfg_.user, cfg_.password, body, sub_url, ACTION);
     // HTTP timeout > SOAP pull timeout (5 s) to allow for network headroom
-    auto resp = soap_post_r(sub_url, soap, ACTION, 20);
+    auto resp_or = soap_post_r(sub_url, soap, ACTION, 20);
+    if (!resp_or.ok()) return resp_or.status();
 
+    const HttpResponse& resp = *resp_or;
     if (resp.status_code != 200)
-      throw std::runtime_error(
+      return absl::InternalError(
         "PullMessages HTTP " + std::to_string(resp.status_code) +
         ": " + resp.body.substr(0, 300));
 
@@ -595,11 +644,14 @@ class CameraWorker {
         n.topic, n.event_time, n.property_op,
         n.source, n.data});
     }
+    return absl::OkStatus();
   }
 
   std::vector<Notification> parse_notifications(const std::string& xml) {
     std::vector<Notification> out;
-    XmlDoc doc(xml);
+    auto doc_or = XmlDoc::Create(xml);
+    if (!doc_or.ok()) return out;
+    XmlDoc& doc = *doc_or;
 
     auto notifs = doc.xpath("//wsnt:NotificationMessage");
     if (!notifs || !notifs->nodesetval) return out;
@@ -683,8 +735,15 @@ void OnvifListener::run(EventCallback cb) {
 
   // Create raw recorder if a path was configured (lives for the duration of run())
   std::unique_ptr<RawRecorder> raw_recorder;
-  if (!raw_path_.empty())
-    raw_recorder = std::make_unique<RawRecorder>(raw_path_);
+  if (!raw_path_.empty()) {
+    auto raw_or = RawRecorder::Create(raw_path_);
+    if (!raw_or.ok()) {
+      std::cerr << "[onvif] raw recording disabled: "
+                << raw_or.status().message() << '\n';
+    } else {
+      raw_recorder = std::move(*raw_or);
+    }
+  }
   RawRecorder* raw = raw_recorder.get();  // nullptr when disabled
 
   // Build workers (heap-allocated so their address is stable across moves)

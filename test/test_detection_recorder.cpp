@@ -371,7 +371,13 @@ static void test_detection_e2e(const std::string& db_path,
   ctx.ubv_dir = ubv_dir;
 
   // 2 s pre + 2 s post (defaults)
-  onvif::DetectionRecorder recorder(onvif::DbBackend::SQLite, db_path);
+  auto rec_or = onvif::DetectionRecorder::Create(onvif::DbBackend::SQLite, db_path);
+  if (!rec_or.ok()) {
+    CHECK(false, std::string("DetectionRecorder::Create failed: ")
+                 + std::string(rec_or.status().message()));
+    return;
+  }
+  onvif::DetectionRecorder& recorder = **rec_or;
   bool ok = run_standard_script(ctx, recorder);
 
   CHECK(ok, "timed out before all detection events arrived");
@@ -474,33 +480,41 @@ static void test_detection_e2e(const std::string& db_path,
   const std::string ubv109 = ubv_dir + "/" + ctx.cfg109.ip + "_thumbnails.ubv";
 
   // cam108: 2 frames (human start + vehicle start)
-  try {
-    auto frames = ubv::decode(ubv108);
-    CHECK(frames.size() == 2,
-          "expected 2 UBV frames for cam108, got " + std::to_string(frames.size()));
-    for (std::size_t i = 0; i < frames.size(); ++i) {
-      bool valid = frames[i].jpeg.size() >= 2
-                && frames[i].jpeg[0] == 0xff
-                && frames[i].jpeg[1] == 0xd8;
-      CHECK(valid, "cam108 UBV frame " + std::to_string(i) + " is not a valid JPEG");
+  {
+    auto frames_or = ubv::decode(ubv108);
+    if (!frames_or.ok()) {
+      CHECK(false, std::string("ubv::decode failed for cam108: ")
+                   + std::string(frames_or.status().message()));
+    } else {
+      const auto& frames = *frames_or;
+      CHECK(frames.size() == 2,
+            "expected 2 UBV frames for cam108, got " + std::to_string(frames.size()));
+      for (std::size_t i = 0; i < frames.size(); ++i) {
+        bool valid = frames[i].jpeg.size() >= 2
+                  && frames[i].jpeg[0] == 0xff
+                  && frames[i].jpeg[1] == 0xd8;
+        CHECK(valid, "cam108 UBV frame " + std::to_string(i) + " is not a valid JPEG");
+      }
     }
-  } catch (const std::exception& e) {
-    CHECK(false, std::string("ubv::decode failed for cam108: ") + e.what());
   }
 
   // cam109: 1 frame (human start)
-  try {
-    auto frames = ubv::decode(ubv109);
-    CHECK(frames.size() == 1,
-          "expected 1 UBV frame for cam109, got " + std::to_string(frames.size()));
-    if (!frames.empty()) {
-      bool valid = frames[0].jpeg.size() >= 2
-                && frames[0].jpeg[0] == 0xff
-                && frames[0].jpeg[1] == 0xd8;
-      CHECK(valid, "cam109 UBV frame 0 is not a valid JPEG");
+  {
+    auto frames_or = ubv::decode(ubv109);
+    if (!frames_or.ok()) {
+      CHECK(false, std::string("ubv::decode failed for cam109: ")
+                   + std::string(frames_or.status().message()));
+    } else {
+      const auto& frames = *frames_or;
+      CHECK(frames.size() == 1,
+            "expected 1 UBV frame for cam109, got " + std::to_string(frames.size()));
+      if (!frames.empty()) {
+        bool valid = frames[0].jpeg.size() >= 2
+                  && frames[0].jpeg[0] == 0xff
+                  && frames[0].jpeg[1] == 0xd8;
+        CHECK(valid, "cam109 UBV frame 0 is not a valid JPEG");
+      }
     }
-  } catch (const std::exception& e) {
-    CHECK(false, std::string("ubv::decode failed for cam109: ") + e.what());
   }
 }
 
@@ -517,7 +531,13 @@ static void test_buffer_padding(const std::string& db_path,
   const uint32_t post_sec = 3;
   const uint64_t min_span = (pre_sec + post_sec) * 1000;  // 4000 ms
 
-  onvif::DetectionRecorder recorder(onvif::DbBackend::SQLite, db_path);
+  auto rec_or2 = onvif::DetectionRecorder::Create(onvif::DbBackend::SQLite, db_path);
+  if (!rec_or2.ok()) {
+    CHECK(false, std::string("DetectionRecorder::Create failed: ")
+                 + std::string(rec_or2.status().message()));
+    return;
+  }
+  onvif::DetectionRecorder& recorder = **rec_or2;
   recorder.set_buffer(pre_sec, post_sec);
 
   bool ok = run_standard_script(ctx, recorder);

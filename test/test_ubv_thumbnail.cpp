@@ -31,7 +31,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -39,12 +38,18 @@
 
 static std::vector<uint8_t> read_file(const std::string& path) {
   std::ifstream f(path, std::ios::binary | std::ios::ate);
-  if (!f) throw std::runtime_error("cannot open: " + path);
+  if (!f) {
+    std::cerr << "cannot open: " << path << '\n';
+    return {};
+  }
   auto sz = f.tellg();
   f.seekg(0);
   std::vector<uint8_t> buf(static_cast<size_t>(sz));
   f.read(reinterpret_cast<char*>(buf.data()), sz);
-  if (!f) throw std::runtime_error("read error: " + path);
+  if (!f) {
+    std::cerr << "read error: " << path << '\n';
+    return {};
+  }
   return buf;
 }
 
@@ -83,13 +88,15 @@ static int run_self_contained() {
 
   // Build input frames from the two snapshot JPEGs.
   std::vector<ubv::Frame> input_frames;
-  try {
-    input_frames.push_back({1000000000000ULL, read_file(path108)});
-    input_frames.push_back({1000000001000ULL, read_file(path109)});
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL: could not read snapshot files: " << e.what() << '\n';
+  auto bytes108 = read_file(path108);
+  auto bytes109 = read_file(path109);
+  if (bytes108.empty() || bytes109.empty()) {
+    std::cerr << "FAIL: could not read snapshot files\n";
     return 1;
   }
+  input_frames.push_back({1000000000000ULL, std::move(bytes108)});
+  input_frames.push_back({1000000001000ULL, std::move(bytes109)});
+
   std::cout << "  Loaded " << input_frames.size() << " frames from snapshot JPEGs\n";
   for (size_t i = 0; i < input_frames.size(); ++i)
     std::cout << "  [" << i << "] ts=" << input_frames[i].timestamp_ms
@@ -102,22 +109,25 @@ static int run_self_contained() {
   }
 
   // Encode.
-  try {
-    ubv::encode(ubv_out, input_frames);
+  {
+    auto s = ubv::encode(ubv_out, input_frames);
+    if (!s.ok()) {
+      std::cerr << "FAIL encode: " << s.message() << '\n';
+      return 1;
+    }
     std::cout << "  Encoded -> " << ubv_out << '\n';
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL encode: " << e.what() << '\n';
-    return 1;
   }
 
   // Decode.
   std::vector<ubv::Frame> decoded;
-  try {
-    decoded = ubv::decode(ubv_out);
+  {
+    auto frames_or = ubv::decode(ubv_out);
+    if (!frames_or.ok()) {
+      std::cerr << "FAIL decode: " << frames_or.status().message() << '\n';
+      return 1;
+    }
+    decoded = std::move(*frames_or);
     std::cout << "  Decoded " << decoded.size() << " frame(s)\n";
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL decode: " << e.what() << '\n';
-    return 1;
   }
 
   // Compare.
@@ -142,26 +152,40 @@ static int run_self_contained() {
   // Also test append() builds the same result one frame at a time.
   const std::string ubv_append = "/tmp/ubv_append_test.ubv";
   std::remove(ubv_append.c_str());
-  try {
-    for (const auto& f : input_frames)
-      ubv::append(ubv_append, f);
-    std::vector<ubv::Frame> appended = ubv::decode(ubv_append);
-    if (appended.size() != input_frames.size()) {
-      std::cerr << "  MISMATCH append frame count\n";
-      all_ok = false;
-    } else {
-      for (size_t i = 0; i < input_frames.size(); ++i) {
-        if (input_frames[i].timestamp_ms != appended[i].timestamp_ms ||
-            input_frames[i].jpeg         != appended[i].jpeg) {
-          std::cerr << "  [" << i << "] MISMATCH after append\n";
-          all_ok = false;
-        }
+  {
+    bool append_ok = true;
+    for (const auto& f : input_frames) {
+      auto s = ubv::append(ubv_append, f);
+      if (!s.ok()) {
+        std::cerr << "FAIL append: " << s.message() << '\n';
+        all_ok = false;
+        append_ok = false;
+        break;
       }
     }
-    if (all_ok) std::cout << "  append() round-trip OK\n";
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL append test: " << e.what() << '\n';
-    all_ok = false;
+    if (append_ok) {
+      auto appended_or = ubv::decode(ubv_append);
+      if (!appended_or.ok()) {
+        std::cerr << "FAIL decode after append: "
+                  << appended_or.status().message() << '\n';
+        all_ok = false;
+      } else {
+        const auto& appended = *appended_or;
+        if (appended.size() != input_frames.size()) {
+          std::cerr << "  MISMATCH append frame count\n";
+          all_ok = false;
+        } else {
+          for (size_t i = 0; i < input_frames.size(); ++i) {
+            if (input_frames[i].timestamp_ms != appended[i].timestamp_ms ||
+                input_frames[i].jpeg         != appended[i].jpeg) {
+              std::cerr << "  [" << i << "] MISMATCH after append\n";
+              all_ok = false;
+            }
+          }
+        }
+        if (all_ok) std::cout << "  append() round-trip OK\n";
+      }
+    }
   }
 
   std::cout << "\n=== Result ===\n";
@@ -178,11 +202,13 @@ static int run_self_contained() {
 static int run_file_mode(const std::string& input_path) {
   std::cout << "=== Step 1: Decode " << input_path << " ===\n";
   std::vector<ubv::Frame> frames;
-  try {
-    frames = ubv::decode(input_path);
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL decode: " << e.what() << '\n';
-    return 1;
+  {
+    auto frames_or = ubv::decode(input_path);
+    if (!frames_or.ok()) {
+      std::cerr << "FAIL decode: " << frames_or.status().message() << '\n';
+      return 1;
+    }
+    frames = std::move(*frames_or);
   }
   if (frames.empty()) {
     std::cerr << "FAIL: no JPEG frames found\n";
@@ -200,22 +226,25 @@ static int run_file_mode(const std::string& input_path) {
 
   std::cout << "\n=== Step 3: Re-encode ===\n";
   const std::string reenc = "/tmp/ubv_test_reencoded.ubv";
-  try {
-    ubv::encode(reenc, frames);
+  {
+    auto s = ubv::encode(reenc, frames);
+    if (!s.ok()) {
+      std::cerr << "FAIL encode: " << s.message() << '\n';
+      return 1;
+    }
     std::cout << "  Encoded -> " << reenc << '\n';
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL encode: " << e.what() << '\n';
-    return 1;
   }
 
   std::cout << "\n=== Step 4: Decode re-encoded ===\n";
   std::vector<ubv::Frame> frames2;
-  try {
-    frames2 = ubv::decode(reenc);
+  {
+    auto frames2_or = ubv::decode(reenc);
+    if (!frames2_or.ok()) {
+      std::cerr << "FAIL decode2: " << frames2_or.status().message() << '\n';
+      return 1;
+    }
+    frames2 = std::move(*frames2_or);
     std::cout << "  Decoded " << frames2.size() << " frame(s)\n";
-  } catch (const std::exception& e) {
-    std::cerr << "FAIL decode2: " << e.what() << '\n';
-    return 1;
   }
 
   std::cout << "\n=== Step 5: Compare ===\n";

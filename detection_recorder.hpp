@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "onvif_listener.hpp"
 
 namespace onvif {
@@ -102,11 +104,16 @@ enum class DbBackend { SQLite, PostgreSQL };
  */
 class DetectionRecorder {
  public:
-  DetectionRecorder(DbBackend backend, const std::string& conn);
+  /// Factory: creates backend, runs create_schema(). Returns error on failure.
+  static absl::StatusOr<std::unique_ptr<DetectionRecorder>> Create(
+      DbBackend backend, const std::string& conn);
+
   ~DetectionRecorder();
 
   DetectionRecorder(const DetectionRecorder&)            = delete;
   DetectionRecorder& operator=(const DetectionRecorder&) = delete;
+  DetectionRecorder(DetectionRecorder&&)                 = delete;
+  DetectionRecorder& operator=(DetectionRecorder&&)      = delete;
 
   /// Register snapshot credentials for a camera. Must be called before run().
   void set_snapshot(const CameraConfig& cam);
@@ -133,7 +140,7 @@ class DetectionRecorder {
   struct IDbBackend {
     virtual ~IDbBackend() = default;
 
-    virtual void create_schema() = 0;
+    virtual absl::Status create_schema() = 0;
 
     /// Register a camera's identifiers before the listener starts.
     /// SQLite: no-op.  PG: stores ip->id and ip->mac for later lookups.
@@ -183,6 +190,8 @@ class DetectionRecorder {
   };
 
  private:
+  DetectionRecorder() = default;
+
   struct SnapshotInfo {
     std::string url;
     std::string user;

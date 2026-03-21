@@ -28,11 +28,12 @@
 #include <memory>
 #include <optional>
 #include <random>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "ubv_thumbnail.hpp"
 
 namespace onvif {
@@ -214,13 +215,21 @@ namespace {
 struct SqliteBackend final : DetectionRecorder::IDbBackend {
   sqlite3* db_{nullptr};
 
+  static absl::StatusOr<std::unique_ptr<SqliteBackend>> Create(
+      const std::string& path) {
+    auto b = std::make_unique<SqliteBackend>(path);
+    if (!b->db_) {
+      return absl::InternalError("SQLite open failed: " + path);
+    }
+    return b;
+  }
+
   explicit SqliteBackend(const std::string& path) {
     int rc = sqlite3_open(path.c_str(), &db_);
     if (rc != SQLITE_OK) {
-      std::string msg = db_ ? sqlite3_errmsg(db_) : "sqlite3_open failed";
-      sqlite3_close(db_);
-      db_ = nullptr;
-      throw std::runtime_error("SQLite open failed: " + msg);
+      // Store error; db_ may still need closing
+      if (db_) { sqlite3_close(db_); db_ = nullptr; }
+      return;
     }
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
   }
@@ -229,7 +238,7 @@ struct SqliteBackend final : DetectionRecorder::IDbBackend {
     if (db_) sqlite3_close(db_);
   }
 
-  void create_schema() override {
+  absl::Status create_schema() override {
     const char* sql =
       "CREATE TABLE IF NOT EXISTS events ("
       "  id                        TEXT PRIMARY KEY,"
@@ -286,8 +295,9 @@ struct SqliteBackend final : DetectionRecorder::IDbBackend {
     if (rc != SQLITE_OK) {
       std::string msg = errmsg ? errmsg : "unknown error";
       sqlite3_free(errmsg);
-      throw std::runtime_error("SQLite schema creation failed: " + msg);
+      return absl::InternalError("SQLite schema creation failed: " + msg);
     }
+    return absl::OkStatus();
   }
 
   void register_camera(const std::string& /*ip*/,
@@ -387,13 +397,20 @@ struct PgBackend final : DetectionRecorder::IDbBackend {
   std::map<std::string, std::string> ip_to_id_;
   std::map<std::string, std::string> ip_to_mac_;
 
+  static absl::StatusOr<std::unique_ptr<PgBackend>> Create(
+      const std::string& conninfo) {
+    auto b = std::make_unique<PgBackend>(conninfo);
+    if (!b->conn_) {
+      return absl::InternalError("PostgreSQL connect failed");
+    }
+    return b;
+  }
+
   explicit PgBackend(const std::string& conninfo) {
     conn_ = PQconnectdb(conninfo.c_str());
     if (PQstatus(conn_) != CONNECTION_OK) {
-      std::string msg = PQerrorMessage(conn_);
       PQfinish(conn_);
       conn_ = nullptr;
-      throw std::runtime_error("PostgreSQL connect failed: " + msg);
     }
   }
 
@@ -403,7 +420,7 @@ struct PgBackend final : DetectionRecorder::IDbBackend {
 
   // Verify the expected tables are accessible.  The schema already exists
   // in UniFi Protect's database -- we never try to create it.
-  void create_schema() override {
+  absl::Status create_schema() override {
     PGresult* res = PQexec(conn_,
       "SELECT 1 FROM events LIMIT 0;"
       "SELECT 1 FROM \"smartDetectObjects\" LIMIT 0;"
@@ -412,9 +429,10 @@ struct PgBackend final : DetectionRecorder::IDbBackend {
     if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) {
       std::string msg = PQresultErrorMessage(res);
       PQclear(res);
-      throw std::runtime_error("PostgreSQL table check failed: " + msg);
+      return absl::InternalError("PostgreSQL table check failed: " + msg);
     }
     PQclear(res);
+    return absl::OkStatus();
   }
 
   void register_camera(const std::string& ip,
@@ -561,16 +579,28 @@ struct PgBackend final : DetectionRecorder::IDbBackend {
 // ============================================================
 // DetectionRecorder
 // ============================================================
-DetectionRecorder::DetectionRecorder(DbBackend backend, const std::string& conn) {
+
+// static factory
+absl::StatusOr<std::unique_ptr<DetectionRecorder>> DetectionRecorder::Create(
+    DbBackend backend, const std::string& conn) {
+  auto dr = std::unique_ptr<DetectionRecorder>(new DetectionRecorder());
   switch (backend) {
-    case DbBackend::SQLite:
-      db_ = std::make_unique<SqliteBackend>(conn);
+    case DbBackend::SQLite: {
+      auto b_or = SqliteBackend::Create(conn);
+      if (!b_or.ok()) return b_or.status();
+      dr->db_ = std::move(*b_or);
       break;
-    case DbBackend::PostgreSQL:
-      db_ = std::make_unique<PgBackend>(conn);
+    }
+    case DbBackend::PostgreSQL: {
+      auto b_or = PgBackend::Create(conn);
+      if (!b_or.ok()) return b_or.status();
+      dr->db_ = std::move(*b_or);
       break;
+    }
   }
-  db_->create_schema();
+  absl::Status s = dr->db_->create_schema();
+  if (!s.ok()) return s;
+  return dr;
 }
 
 DetectionRecorder::~DetectionRecorder() = default;
@@ -645,10 +675,10 @@ void DetectionRecorder::on_event(const OnvifEvent& ev) {
       if (!ubv_dir.empty()) {
         const std::string ubv_path =
           ubv_dir + "/" + ev.camera_ip + "_thumbnails.ubv";
-        try {
-          ubv::append(ubv_path, {ts_ms, snapshot});
-        } catch (const std::exception&) {
-          // Non-fatal: event is already in the database.
+        auto s = ubv::append(ubv_path, {ts_ms, snapshot});
+        if (!s.ok()) {
+          std::fprintf(stderr, "[ubv] append failed (non-fatal): %s\n",
+                       std::string(s.message()).c_str());
         }
       }
       db_->write_thumbnail(thumb_id, event_id, ev.camera_ip,

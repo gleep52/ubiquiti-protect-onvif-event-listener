@@ -16,7 +16,10 @@ cc_library(
     name = "onvif_listener",
     srcs = ["onvif_listener.cpp"],
     hdrs = ["onvif_listener.hpp"],
-    deps = _CURL + _XML2 + _SSL,
+    deps = _CURL + _XML2 + _SSL + [
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -24,6 +27,10 @@ cc_library(
     name = "ubv_thumbnail",
     srcs = ["ubv_thumbnail.cpp"],
     hdrs = ["ubv_thumbnail.hpp"],
+    deps = [
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -34,6 +41,8 @@ cc_library(
     deps = [
         ":onvif_listener",
         ":ubv_thumbnail",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
     ] + _CURL + _SQLITE + _PQ,
     visibility = ["//visibility:public"],
 )
@@ -42,7 +51,11 @@ cc_library(
     name = "unifi_camera_config",
     srcs = ["unifi_camera_config.cpp"],
     hdrs = ["unifi_camera_config.hpp"],
-    deps = [":onvif_listener"] + _PQ,
+    deps = [
+        ":onvif_listener",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
+    ] + _PQ,
     visibility = ["//visibility:public"],
 )
 

@@ -31,9 +31,10 @@
 #include <map>
 #include <mutex>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "detection_recorder.hpp"
 #include "onvif_listener.hpp"
 #include "unifi_camera_config.hpp"
@@ -99,11 +100,13 @@ static std::string json_obj(const std::map<std::string, std::string>& m) {
 // ============================================================
 class EventRecorder {
  public:
-  explicit EventRecorder(const std::string& path) {
-    file_.open(path, std::ios::app);
-    if (!file_.is_open())
-      throw std::runtime_error("Cannot open: " + path);
+  static absl::StatusOr<std::unique_ptr<EventRecorder>> Create(
+      const std::string& path) {
+    auto r = std::unique_ptr<EventRecorder>(new EventRecorder(path));
+    if (!r->file_.is_open())
+      return absl::InternalError("Cannot open: " + path);
     std::cerr << "[recorder] output -> " << path << '\n';
+    return r;
   }
 
   void write(const onvif::OnvifEvent& ev) {
@@ -125,6 +128,10 @@ class EventRecorder {
   }
 
  private:
+  explicit EventRecorder(const std::string& path) {
+    file_.open(path, std::ios::app);
+  }
+
   std::ofstream file_;
   std::mutex    mu_;
 };
@@ -203,48 +210,69 @@ int main() {
 
   onvif::global_init();
 
-  try {
-    EventRecorder            event_rec(output_path);
-    onvif::DetectionRecorder det_rec(db_backend, db_conn);
-    det_rec.set_buffer(pre_buf_sec, post_buf_sec);
-
-    onvif::OnvifListener listener;
-    g_listener = &listener;
-    std::signal(SIGINT,  signal_handler);
-    std::signal(SIGTERM, signal_handler);
-    if (verbose) listener.enable_verbose_logging();
-
-    if (!thumbs_dir.empty())
-      det_rec.set_ubv_dir(thumbs_dir);
-
-    // Camera configs are loaded from the UniFi Protect database.
-    // ONVIF_DB_HOST overrides the host (default: 127.0.0.1).
-    // When using the postgres backend without an explicit override, use the
-    // local Unix socket so no TCP listener is required on the router.
-    unifi::DbConfig cam_db;
-    if (env_db_host)
-      cam_db.host = env_db_host;
-    else if (db_backend == onvif::DbBackend::PostgreSQL)
-      cam_db.host = "/run/postgresql";
-
-    auto cameras = unifi::load_cameras(cam_db);
-    unifi::enable_smart_detect(cameras, cam_db);
-    for (auto cam : cameras) {
-      cam.max_consecutive_failures = 5;
-      listener.add_camera(cam);
-      det_rec.set_snapshot(cam);
-    }
-    listener.enable_raw_recording(raw_path);
-
-    listener.run([&event_rec, &det_rec](const onvif::OnvifEvent& ev) {
-      event_rec.write(ev);
-      det_rec.on_event(ev);
-    });
-  } catch (const std::exception& e) {
-    std::cerr << "Fatal: " << e.what() << '\n';
+  // EventRecorder
+  auto er_or = EventRecorder::Create(output_path);
+  if (!er_or.ok()) {
+    std::cerr << "Fatal: " << er_or.status().message() << '\n';
     onvif::global_cleanup();
     return 1;
   }
+  EventRecorder& event_rec = **er_or;
+
+  // DetectionRecorder
+  auto dr_or = onvif::DetectionRecorder::Create(db_backend, db_conn);
+  if (!dr_or.ok()) {
+    std::cerr << "Fatal: " << dr_or.status().message() << '\n';
+    onvif::global_cleanup();
+    return 1;
+  }
+  onvif::DetectionRecorder& det_rec = **dr_or;
+  det_rec.set_buffer(pre_buf_sec, post_buf_sec);
+
+  onvif::OnvifListener listener;
+  g_listener = &listener;
+  std::signal(SIGINT,  signal_handler);
+  std::signal(SIGTERM, signal_handler);
+  if (verbose) listener.enable_verbose_logging();
+
+  if (!thumbs_dir.empty())
+    det_rec.set_ubv_dir(thumbs_dir);
+
+  // Camera configs are loaded from the UniFi Protect database.
+  // ONVIF_DB_HOST overrides the host (default: 127.0.0.1).
+  // When using the postgres backend without an explicit override, use the
+  // local Unix socket so no TCP listener is required on the router.
+  unifi::DbConfig cam_db;
+  if (env_db_host)
+    cam_db.host = env_db_host;
+  else if (db_backend == onvif::DbBackend::PostgreSQL)
+    cam_db.host = "/run/postgresql";
+
+  auto cams_or = unifi::load_cameras(cam_db);
+  if (!cams_or.ok()) {
+    std::cerr << "Fatal: " << cams_or.status().message() << '\n';
+    onvif::global_cleanup();
+    return 1;
+  }
+  auto cameras = std::move(*cams_or);
+
+  if (auto s = unifi::enable_smart_detect(cameras, cam_db); !s.ok()) {
+    std::cerr << "Fatal: " << s.message() << '\n';
+    onvif::global_cleanup();
+    return 1;
+  }
+
+  for (auto cam : cameras) {
+    cam.max_consecutive_failures = 5;
+    listener.add_camera(cam);
+    det_rec.set_snapshot(cam);
+  }
+  listener.enable_raw_recording(raw_path);
+
+  listener.run([&event_rec, &det_rec](const onvif::OnvifEvent& ev) {
+    event_rec.write(ev);
+    det_rec.on_event(ev);
+  });
 
   g_listener = nullptr;
   onvif::global_cleanup();

@@ -16,9 +16,11 @@
 
 #include <libpq-fe.h>
 
-#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 
 namespace unifi {
 
@@ -75,7 +77,8 @@ static std::string json_get(const std::string& json, const std::string& key) {
 
 // ---------------------------------------------------------------------------
 
-std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db) {
+absl::StatusOr<std::vector<onvif::CameraConfig>> load_cameras(
+    const DbConfig& db) {
   std::string connstr =
     "host="   + db.host   +
     " port="  + std::to_string(db.port) +
@@ -88,7 +91,7 @@ std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db) {
   if (PQstatus(conn) != CONNECTION_OK) {
     std::string err = PQerrorMessage(conn);
     PQfinish(conn);
-    throw std::runtime_error("unifi::load_cameras: " + err);
+    return absl::InternalError("unifi::load_cameras: " + err);
   }
 
   const char* sql =
@@ -103,7 +106,7 @@ std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db) {
     std::string err = PQresultErrorMessage(res);
     PQclear(res);
     PQfinish(conn);
-    throw std::runtime_error("unifi::load_cameras query: " + err);
+    return absl::InternalError("unifi::load_cameras query: " + err);
   }
 
   std::vector<onvif::CameraConfig> cameras;
@@ -134,9 +137,10 @@ std::vector<onvif::CameraConfig> load_cameras(const DbConfig& db) {
 
 // ---------------------------------------------------------------------------
 
-void enable_smart_detect(const std::vector<onvif::CameraConfig>& cameras,
-                         const DbConfig& db) {
-  if (cameras.empty()) return;
+absl::Status enable_smart_detect(
+    const std::vector<onvif::CameraConfig>& cameras,
+    const DbConfig& db) {
+  if (cameras.empty()) return absl::OkStatus();
 
   std::string connstr =
     "host="    + db.host   +
@@ -150,7 +154,7 @@ void enable_smart_detect(const std::vector<onvif::CameraConfig>& cameras,
   if (PQstatus(conn) != CONNECTION_OK) {
     std::string err = PQerrorMessage(conn);
     PQfinish(conn);
-    throw std::runtime_error("unifi::enable_smart_detect: " + err);
+    return absl::InternalError("unifi::enable_smart_detect: " + err);
   }
 
   // For each camera: if either smartDetectTypes (featureFlags) or objectTypes
@@ -185,12 +189,13 @@ void enable_smart_detect(const std::vector<onvif::CameraConfig>& cameras,
       std::string err = PQresultErrorMessage(res);
       PQclear(res);
       PQfinish(conn);
-      throw std::runtime_error("unifi::enable_smart_detect update: " + err);
+      return absl::InternalError("unifi::enable_smart_detect update: " + err);
     }
     PQclear(res);
   }
 
   PQfinish(conn);
+  return absl::OkStatus();
 }
 
 }  // namespace unifi

@@ -18,7 +18,11 @@ cc_library(
     name = "camera_emulators",
     srcs = ["camera_emulators.cpp"],
     hdrs = ["camera_emulators.hpp"],
-    deps = [":onvif_camera_emulator"],
+    deps = [
+        ":onvif_camera_emulator",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
+    ],
 )
 
 filegroup(
@@ -36,6 +40,8 @@ cc_test(
         "//:onvif_listener",
         ":camera_emulators",
         ":onvif_camera_emulator",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
     ],
 )
 
@@ -50,6 +56,8 @@ cc_test(
         "//:detection_recorder",
         "//:ubv_thumbnail",
         ":onvif_camera_emulator",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
     ],
 )
 
@@ -60,7 +68,11 @@ cc_test(
         "testdata/snapshot_108.jpg",
         "testdata/snapshot_109.jpg",
     ],
-    deps = ["//:ubv_thumbnail"],
+    deps = [
+        "//:ubv_thumbnail",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
+    ],
 )
 
 filegroup(
@@ -78,5 +90,7 @@ cc_binary(
         "//:onvif_listener",
         ":camera_emulators",
         ":onvif_camera_emulator",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/status:statusor",
     ],
 )
