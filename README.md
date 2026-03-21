@@ -38,7 +38,7 @@ Logs are written to `/var/log/onvif-recorder.log`.
 
 ---
 
-## Performance (Dream Router 60)
+## Performance (Dream Router)
 
 The recorder uses negligible CPU at normal camera workloads:
 
