@@ -26,16 +26,28 @@ cc_library(
 )
 
 filegroup(
-    name = "onvif_raw_log",
-    srcs = ["testdata/onvif_raw_20260219_085752.jsonl"],
+    name = "hikvision_raw_log",
+    srcs = ["testdata/hikvision_compatible_20260219.jsonl"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dahua_raw_log",
+    srcs = ["testdata/dahua_dh_sd4a425db_hny_20260219.jsonl"],
     visibility = ["//visibility:public"],
 )
 
 cc_test(
     name = "test_onvif_listener",
     srcs = ["test_onvif_listener.cpp"],
-    args = ["$(location //test:onvif_raw_log)"],
-    data = ["//test:onvif_raw_log"],
+    args = [
+        "$(location //test:hikvision_raw_log)",
+        "$(location //test:dahua_raw_log)",
+    ],
+    data = [
+        "//test:hikvision_raw_log",
+        "//test:dahua_raw_log",
+    ],
     deps = [
         "//:onvif_listener",
         ":camera_emulators",

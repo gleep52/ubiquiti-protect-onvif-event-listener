@@ -37,17 +37,17 @@ struct RecordedSession {
   std::vector<RecordedExchange> pull;        ///< PullMessages
   std::vector<RecordedExchange> renew;       ///< Renew
 
-  /// Parse @p jsonl_path and return entries matching @p camera_ip.
-  static RecordedSession from_jsonl(const std::string& jsonl_path,
-                                    const std::string& camera_ip);
+  /// Parse all entries from @p jsonl_path (one camera per file).
+  static RecordedSession from_jsonl(const std::string& jsonl_path);
 };
 
 // ============================================================
-// Camera108Emulator -- 192.168.1.108 (always subscribes on first attempt)
+// HikvisionCompatibleEmulator -- Hikvision-compatible camera
+// (subscribes on first attempt, emits Initialized + Changed events)
 // ============================================================
-class Camera108Emulator : public OnvifCameraEmulator {
+class HikvisionCompatibleEmulator : public OnvifCameraEmulator {
  public:
-  explicit Camera108Emulator(const std::string& jsonl_path);
+  explicit HikvisionCompatibleEmulator(const std::string& jsonl_path);
 
  protected:
   std::pair<int, std::string> handle(
@@ -64,11 +64,12 @@ class Camera108Emulator : public OnvifCameraEmulator {
 };
 
 // ============================================================
-// Camera109Emulator -- 192.168.1.109 (returns 400 x N then 200 for subscribe)
+// DahuaSD4A425DBEmulator -- Dahua DH-SD4A425DB-HNY PTZ camera
+// (returns 400 x N then 200 for subscribe, motion/alarm topics)
 // ============================================================
-class Camera109Emulator : public OnvifCameraEmulator {
+class DahuaSD4A425DBEmulator : public OnvifCameraEmulator {
  public:
-  explicit Camera109Emulator(const std::string& jsonl_path);
+  explicit DahuaSD4A425DBEmulator(const std::string& jsonl_path);
 
  protected:
   std::pair<int, std::string> handle(

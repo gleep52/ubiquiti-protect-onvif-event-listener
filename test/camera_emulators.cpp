@@ -149,8 +149,7 @@ std::pair<int, std::string> next_cycle(
 // ============================================================
 // RecordedSession::from_jsonl
 // ============================================================
-RecordedSession RecordedSession::from_jsonl(const std::string& path,
-                                            const std::string& camera_ip) {
+RecordedSession RecordedSession::from_jsonl(const std::string& path) {
   std::ifstream f(path);
   if (!f.is_open()) {
     std::fprintf(stderr, "Fatal: Cannot open raw log: %s\n", path.c_str());
@@ -163,7 +162,6 @@ RecordedSession RecordedSession::from_jsonl(const std::string& path,
   while (std::getline(f, line)) {
     if (line.empty()) continue;
     auto e = parse_line(line);
-    if (e.camera_ip != camera_ip) continue;
 
     RecordedExchange ex{static_cast<int>(e.response_status), e.response};
     const auto tail = action_tail(e.soap_action);
@@ -174,12 +172,12 @@ RecordedSession RecordedSession::from_jsonl(const std::string& path,
   }
 
   if (session.create_sub.empty()) {
-    std::fprintf(stderr, "Fatal: No CreatePullPointSubscription data for %s\n",
-                 camera_ip.c_str());
+    std::fprintf(stderr, "Fatal: No CreatePullPointSubscription data in: %s\n",
+                 path.c_str());
     std::abort();
   }
   if (session.pull.empty()) {
-    std::fprintf(stderr, "Fatal: No PullMessages data for %s\n", camera_ip.c_str());
+    std::fprintf(stderr, "Fatal: No PullMessages data in: %s\n", path.c_str());
     std::abort();
   }
 
@@ -187,14 +185,15 @@ RecordedSession RecordedSession::from_jsonl(const std::string& path,
 }
 
 // ============================================================
-// Camera108Emulator
+// HikvisionCompatibleEmulator
 // ============================================================
-Camera108Emulator::Camera108Emulator(const std::string& jsonl_path)
+HikvisionCompatibleEmulator::HikvisionCompatibleEmulator(
+    const std::string& jsonl_path)
   : OnvifCameraEmulator("192.168.1.108") {
-  session_ = RecordedSession::from_jsonl(jsonl_path, "192.168.1.108");
+  session_ = RecordedSession::from_jsonl(jsonl_path);
 }
 
-std::pair<int, std::string> Camera108Emulator::handle(
+std::pair<int, std::string> HikvisionCompatibleEmulator::handle(
   const std::string& /*path*/,
   const std::string& soap_action,
   const std::string& /*body*/) {
@@ -216,14 +215,14 @@ std::pair<int, std::string> Camera108Emulator::handle(
 }
 
 // ============================================================
-// Camera109Emulator
+// DahuaSD4A425DBEmulator
 // ============================================================
-Camera109Emulator::Camera109Emulator(const std::string& jsonl_path)
+DahuaSD4A425DBEmulator::DahuaSD4A425DBEmulator(const std::string& jsonl_path)
   : OnvifCameraEmulator("192.168.1.109") {
-  session_ = RecordedSession::from_jsonl(jsonl_path, "192.168.1.109");
+  session_ = RecordedSession::from_jsonl(jsonl_path);
 }
 
-std::pair<int, std::string> Camera109Emulator::handle(
+std::pair<int, std::string> DahuaSD4A425DBEmulator::handle(
   const std::string& /*path*/,
   const std::string& soap_action,
   const std::string& /*body*/) {

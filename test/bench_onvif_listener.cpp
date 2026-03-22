@@ -14,7 +14,7 @@
 
 // End-to-end single-core throughput benchmark for OnvifListener.
 //
-// Pins the whole process to CPU 0, fires a Camera108Emulator that serves a
+// Pins the whole process to CPU 0, fires a HikvisionCompatibleEmulator that serves a
 // synthetic PullMessages loop (10 events per pull), and measures how many
 // events/second the full HTTP -> XML-parse -> callback pipeline sustains on
 // a single core.
@@ -66,7 +66,7 @@ int main(int argc, char* argv[]) {
 
   onvif::global_init();
 
-  Camera108Emulator emu(jsonl);
+  HikvisionCompatibleEmulator emu(jsonl);
   emu.start();
 
   onvif::CameraConfig cfg;

@@ -113,10 +113,10 @@ static CollectedEvents collect(
 }
 
 // ============================================================
-// Test: Camera 108 -- subscribes on first attempt, receives events
+// Test: Hikvision-compatible -- subscribes on first attempt, receives events
 // ============================================================
-static void test_camera108_basic(const std::string& jsonl) {
-  Camera108Emulator emu(jsonl);
+static void test_hikvision_basic(const std::string& jsonl) {
+  HikvisionCompatibleEmulator emu(jsonl);
   emu.start();
 
   onvif::CameraConfig cfg;
@@ -151,10 +151,10 @@ static void test_camera108_basic(const std::string& jsonl) {
 }
 
 // ============================================================
-// Test: Camera 108 -- Changed events appear after Initialized batch
+// Test: Hikvision-compatible -- Changed events appear after Initialized batch
 // ============================================================
-static void test_camera108_changed_events(const std::string& jsonl) {
-  Camera108Emulator emu(jsonl);
+static void test_hikvision_changed_events(const std::string& jsonl) {
+  HikvisionCompatibleEmulator emu(jsonl);
   emu.start();
 
   onvif::CameraConfig cfg;
@@ -182,17 +182,17 @@ static void test_camera108_changed_events(const std::string& jsonl) {
 }
 
 // ============================================================
-// Test: Camera 109 -- retries subscription 13x before succeeding
+// Test: Dahua DH-SD4A425DB-HNY -- retries subscription before succeeding
 // ============================================================
-static void test_camera109_retries(const std::string& jsonl) {
-  Camera109Emulator emu(jsonl);
+static void test_dahua_retries(const std::string& jsonl) {
+  DahuaSD4A425DBEmulator emu(jsonl);
   emu.start();
 
   onvif::CameraConfig cfg;
   cfg.ip                 = emu.local_address();
   cfg.user               = "danielwoz";
   cfg.password           = "eW6iO01l";
-  cfg.retry_interval_sec = 1;  // 13 retries x 1 s ~= 13 s delay
+  cfg.retry_interval_sec = 1;  // retries x 1 s before subscribe succeeds
 
   auto r = collect({cfg}, 3, std::chrono::seconds(60));
 
@@ -213,10 +213,10 @@ static void test_camera109_retries(const std::string& jsonl) {
 }
 
 // ============================================================
-// Test: Camera 109 -- events have motion-related topics
+// Test: Dahua DH-SD4A425DB-HNY -- events have motion-related topics
 // ============================================================
-static void test_camera109_topics(const std::string& jsonl) {
-  Camera109Emulator emu(jsonl);
+static void test_dahua_topics(const std::string& jsonl) {
+  DahuaSD4A425DBEmulator emu(jsonl);
   emu.start();
 
   onvif::CameraConfig cfg;
@@ -233,7 +233,7 @@ static void test_camera109_topics(const std::string& jsonl) {
   for (const auto& ev : r.events) {
     if (ev.topic.empty()) continue;  // skip empty-payload PullMessages responses
 
-    // Camera 109 produces motion/alarm events under RuleEngine and VideoSource
+    // Dahua produces motion/alarm events under RuleEngine and VideoSource
     CHECK(ev.topic.find("RuleEngine")    != std::string::npos ||
           ev.topic.find("VideoSource")    != std::string::npos ||
           ev.topic.find("VideoAnalytics") != std::string::npos,
@@ -244,74 +244,79 @@ static void test_camera109_topics(const std::string& jsonl) {
 // ============================================================
 // Test: Both cameras concurrently -- events arrive from both
 // ============================================================
-static void test_both_cameras(const std::string& jsonl) {
-  Camera108Emulator emu108(jsonl);
-  Camera109Emulator emu109(jsonl);
-  emu108.start();
-  emu109.start();
+static void test_both_cameras(const std::string& hikvision_jsonl,
+                               const std::string& dahua_jsonl) {
+  HikvisionCompatibleEmulator emu_hik(hikvision_jsonl);
+  DahuaSD4A425DBEmulator      emu_dah(dahua_jsonl);
+  emu_hik.start();
+  emu_dah.start();
 
-  onvif::CameraConfig cfg108;
-  cfg108.ip                 = emu108.local_address();
-  cfg108.user               = "admin";
-  cfg108.password           = "eW6iO01l";
-  cfg108.retry_interval_sec = 1;
+  onvif::CameraConfig cfg_hik;
+  cfg_hik.ip                 = emu_hik.local_address();
+  cfg_hik.user               = "admin";
+  cfg_hik.password           = "eW6iO01l";
+  cfg_hik.retry_interval_sec = 1;
 
-  onvif::CameraConfig cfg109;
-  cfg109.ip                 = emu109.local_address();
-  cfg109.user               = "danielwoz";
-  cfg109.password           = "eW6iO01l";
-  cfg109.retry_interval_sec = 1;
+  onvif::CameraConfig cfg_dah;
+  cfg_dah.ip                 = emu_dah.local_address();
+  cfg_dah.user               = "danielwoz";
+  cfg_dah.password           = "eW6iO01l";
+  cfg_dah.retry_interval_sec = 1;
 
-  // Camera 108 delivers immediately; camera 109 needs ~13 s to work through
-  // its 13 recorded 400-error responses (retry_interval_sec=1).
-  // Stop as soon as we have >=3 events from cam108 AND >=1 from cam109.
-  const std::string addr108 = emu108.local_address();
-  const std::string addr109 = emu109.local_address();
+  // Hikvision delivers immediately; Dahua needs to work through its recorded
+  // 400-error responses (retry_interval_sec=1).
+  // Stop as soon as we have >=3 events from Hikvision AND >=1 from Dahua.
+  const std::string addr_hik = emu_hik.local_address();
+  const std::string addr_dah = emu_dah.local_address();
 
   auto r = collect_until(
-    {cfg108, cfg109},
+    {cfg_hik, cfg_dah},
     [&](const std::vector<onvif::OnvifEvent>& evs) {
-      int n108 = 0, n109 = 0;
+      int n_hik = 0, n_dah = 0;
       for (const auto& e : evs) {
-        if (e.camera_ip == addr108) ++n108;
-        if (e.camera_ip == addr109) ++n109;
+        if (e.camera_ip == addr_hik) ++n_hik;
+        if (e.camera_ip == addr_dah) ++n_dah;
       }
-      return n108 >= 3 && n109 >= 1;
+      return n_hik >= 3 && n_dah >= 1;
     },
     std::chrono::seconds(60));
 
   CHECK(!r.timed_out, "timed out waiting for events from both cameras");
 
-  int from_108 = 0, from_109 = 0;
+  int from_hik = 0, from_dah = 0;
   for (const auto& ev : r.events) {
-    if (ev.camera_ip == addr108) ++from_108;
-    if (ev.camera_ip == addr109) ++from_109;
+    if (ev.camera_ip == addr_hik) ++from_hik;
+    if (ev.camera_ip == addr_dah) ++from_dah;
   }
-  CHECK(from_108 >= 3,
-        "expected >= 3 events from camera 108, got: " + std::to_string(from_108));
-  CHECK(from_109 >= 1,
-        "expected >= 1 events from camera 109, got: " + std::to_string(from_109));
+  CHECK(from_hik >= 3,
+        "expected >= 3 events from Hikvision-compatible, got: " +
+        std::to_string(from_hik));
+  CHECK(from_dah >= 1,
+        "expected >= 1 events from Dahua DH-SD4A425DB-HNY, got: " +
+        std::to_string(from_dah));
 }
 
 // ============================================================
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <onvif_raw.jsonl>\n"
-              << "  Provide the path to a raw ONVIF recording made with\n"
+  if (argc < 3) {
+    std::cerr << "Usage: " << argv[0]
+              << " <hikvision_compatible.jsonl> <dahua_dh_sd4a425db_hny.jsonl>\n"
+              << "  Each file is a per-camera raw ONVIF recording made with\n"
               << "  OnvifListener::enable_raw_recording().\n";
     return 1;
   }
-  const std::string jsonl = argv[1];
+  const std::string hikvision_jsonl = argv[1];
+  const std::string dahua_jsonl     = argv[2];
 
   onvif::global_init();
 
-  run_test("camera108_basic",          [&] { test_camera108_basic(jsonl); });
-  run_test("camera108_changed_events", [&] { test_camera108_changed_events(jsonl); });
-  run_test("camera109_retries",        [&] { test_camera109_retries(jsonl); });
-  run_test("camera109_topics",         [&] { test_camera109_topics(jsonl); });
-  run_test("both_cameras",             [&] { test_both_cameras(jsonl); });
+  run_test("hikvision_basic",          [&] { test_hikvision_basic(hikvision_jsonl); });
+  run_test("hikvision_changed_events", [&] { test_hikvision_changed_events(hikvision_jsonl); });
+  run_test("dahua_retries",            [&] { test_dahua_retries(dahua_jsonl); });
+  run_test("dahua_topics",             [&] { test_dahua_topics(dahua_jsonl); });
+  run_test("both_cameras",             [&] { test_both_cameras(hikvision_jsonl, dahua_jsonl); });
 
   onvif::global_cleanup();
 
