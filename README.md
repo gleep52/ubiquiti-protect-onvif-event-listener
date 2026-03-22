@@ -24,7 +24,7 @@ From your local machine, download the two files from the
 
 ```bash
 # Copy binary and service file to the router
-scp onvif_recorder root@<router-ip>:/root/
+scp onvif_recorder_arm64 root@<router-ip>:/root/onvif_recorder
 scp onvif-recorder.service root@<router-ip>:/etc/systemd/system/
 ```
 
