@@ -91,13 +91,39 @@ class CellMotionCameraEmulator : public OnvifCameraEmulator {
 // ============================================================
 class ThinginoCameraEmulator : public OnvifCameraEmulator {
  public:
-  ThinginoCameraEmulator();
+  explicit ThinginoCameraEmulator(const std::string& jsonl_path);
 
  protected:
   std::pair<int, std::string> handle(
     const std::string& path,
     const std::string& soap_action,
     const std::string& body) override;
+
+ private:
+  RecordedSession session_;
+  std::size_t     create_idx_{0};
+  std::mutex      mu_;
+};
+
+// ============================================================
+// Html404CameraEmulator -- camera whose web server returns HTTP 200
+// with an HTML "404 File Not Found" body for all ONVIF endpoints.
+// Exercises the XML-parse-failure / graceful-give-up code path.
+// ============================================================
+class Html404CameraEmulator : public OnvifCameraEmulator {
+ public:
+  explicit Html404CameraEmulator(const std::string& jsonl_path);
+
+ protected:
+  std::pair<int, std::string> handle(
+    const std::string& path,
+    const std::string& soap_action,
+    const std::string& body) override;
+
+ private:
+  RecordedSession session_;
+  std::size_t     create_idx_{0};
+  std::mutex      mu_;
 };
 
 // ============================================================

@@ -119,6 +119,19 @@ ParsedEntry parse_line(const std::string& line) {
   return e;
 }
 
+// Read the first camera_ip value from a JSONL file so emulators can
+// pass the correct real IP to rewrite_urls() without hardcoding it.
+std::string peek_camera_ip(const std::string& path) {
+  std::ifstream f(path);
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.empty()) continue;
+    auto e = parse_line(line);
+    if (!e.camera_ip.empty()) return e.camera_ip;
+  }
+  return "";
+}
+
 std::string action_tail(const std::string& soap_action) {
   auto p = soap_action.rfind('/');
   return (p != std::string::npos) ? soap_action.substr(p + 1) : soap_action;
@@ -176,10 +189,7 @@ RecordedSession RecordedSession::from_jsonl(const std::string& path) {
                  path.c_str());
     std::abort();
   }
-  if (session.pull.empty()) {
-    std::fprintf(stderr, "Fatal: No PullMessages data in: %s\n", path.c_str());
-    std::abort();
-  }
+  // pull may be empty for cameras that never reach PullMessages (e.g. always-404).
 
   return session;
 }
@@ -189,7 +199,7 @@ RecordedSession RecordedSession::from_jsonl(const std::string& path) {
 // ============================================================
 HikvisionCompatibleEmulator::HikvisionCompatibleEmulator(
     const std::string& jsonl_path)
-  : OnvifCameraEmulator("192.168.1.108") {
+  : OnvifCameraEmulator(peek_camera_ip(jsonl_path)) {
   session_ = RecordedSession::from_jsonl(jsonl_path);
 }
 
@@ -218,7 +228,7 @@ std::pair<int, std::string> HikvisionCompatibleEmulator::handle(
 // CellMotionCameraEmulator
 // ============================================================
 CellMotionCameraEmulator::CellMotionCameraEmulator(const std::string& jsonl_path)
-  : OnvifCameraEmulator("10.0.0.113") {
+  : OnvifCameraEmulator(peek_camera_ip(jsonl_path)) {
   session_ = RecordedSession::from_jsonl(jsonl_path);
 }
 
@@ -246,25 +256,40 @@ std::pair<int, std::string> CellMotionCameraEmulator::handle(
 // ============================================================
 // ThinginoCameraEmulator
 // ============================================================
-ThinginoCameraEmulator::ThinginoCameraEmulator()
-  : OnvifCameraEmulator("10.0.10.30") {}
+ThinginoCameraEmulator::ThinginoCameraEmulator(const std::string& jsonl_path)
+  : OnvifCameraEmulator(peek_camera_ip(jsonl_path)) {
+  session_ = RecordedSession::from_jsonl(jsonl_path);
+}
 
 std::pair<int, std::string> ThinginoCameraEmulator::handle(
   const std::string& /*path*/,
   const std::string& /*soap_action*/,
   const std::string& /*body*/) {
-  return {404,
-    "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n"
-    "<BODY><H1>404 Not Found</H1>\n"
-    "The requested URL was not found\n"
-    "</BODY></HTML>"};
+  std::lock_guard<std::mutex> lk(mu_);
+  return next_clamp(session_.create_sub, create_idx_);
+}
+
+// ============================================================
+// Html404CameraEmulator
+// ============================================================
+Html404CameraEmulator::Html404CameraEmulator(const std::string& jsonl_path)
+  : OnvifCameraEmulator(peek_camera_ip(jsonl_path)) {
+  session_ = RecordedSession::from_jsonl(jsonl_path);
+}
+
+std::pair<int, std::string> Html404CameraEmulator::handle(
+  const std::string& /*path*/,
+  const std::string& /*soap_action*/,
+  const std::string& /*body*/) {
+  std::lock_guard<std::mutex> lk(mu_);
+  return next_clamp(session_.create_sub, create_idx_);
 }
 
 // ============================================================
 // DahuaSD4A425DBEmulator
 // ============================================================
 DahuaSD4A425DBEmulator::DahuaSD4A425DBEmulator(const std::string& jsonl_path)
-  : OnvifCameraEmulator("192.168.1.109") {
+  : OnvifCameraEmulator(peek_camera_ip(jsonl_path)) {
   session_ = RecordedSession::from_jsonl(jsonl_path);
 }
 

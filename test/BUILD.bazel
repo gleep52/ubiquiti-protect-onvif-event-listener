@@ -43,6 +43,61 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "cell_motion_no_events_raw_log",
+    srcs = ["testdata/cell_motion_no_events_20260321.jsonl"],
+)
+
+filegroup(
+    name = "thingino_raw_log",
+    srcs = ["testdata/thingino_wyze_20260321.jsonl"],
+)
+
+filegroup(
+    name = "html_404_raw_log",
+    srcs = ["testdata/html_404_camera_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_78_raw_log",
+    srcs = ["testdata/unvr_cell_motion_78_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_119_raw_log",
+    srcs = ["testdata/unvr_cell_motion_119_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_173_raw_log",
+    srcs = ["testdata/unvr_cell_motion_173_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_227_raw_log",
+    srcs = ["testdata/unvr_cell_motion_227_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_245_raw_log",
+    srcs = ["testdata/unvr_cell_motion_245_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_251_raw_log",
+    srcs = ["testdata/unvr_cell_motion_251_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_1_45_raw_log",
+    srcs = ["testdata/unvr_cell_motion_1_45_20260321.jsonl"],
+)
+
+filegroup(
+    name = "unvr_1_47_raw_log",
+    srcs = ["testdata/unvr_cell_motion_1_47_20260321.jsonl"],
+)
+
 cc_test(
     name = "test_onvif_listener",
     srcs = ["test_onvif_listener.cpp"],
@@ -50,11 +105,33 @@ cc_test(
         "$(location //test:hikvision_raw_log)",
         "$(location //test:dahua_raw_log)",
         "$(location //test:cell_motion_raw_log)",
+        "$(location //test:cell_motion_no_events_raw_log)",
+        "$(location //test:thingino_raw_log)",
+        "$(location //test:html_404_raw_log)",
+        "$(location //test:unvr_78_raw_log)",
+        "$(location //test:unvr_119_raw_log)",
+        "$(location //test:unvr_173_raw_log)",
+        "$(location //test:unvr_227_raw_log)",
+        "$(location //test:unvr_245_raw_log)",
+        "$(location //test:unvr_251_raw_log)",
+        "$(location //test:unvr_1_45_raw_log)",
+        "$(location //test:unvr_1_47_raw_log)",
     ],
     data = [
         "//test:hikvision_raw_log",
         "//test:dahua_raw_log",
         "//test:cell_motion_raw_log",
+        "//test:cell_motion_no_events_raw_log",
+        "//test:thingino_raw_log",
+        "//test:html_404_raw_log",
+        "//test:unvr_78_raw_log",
+        "//test:unvr_119_raw_log",
+        "//test:unvr_173_raw_log",
+        "//test:unvr_227_raw_log",
+        "//test:unvr_245_raw_log",
+        "//test:unvr_251_raw_log",
+        "//test:unvr_1_45_raw_log",
+        "//test:unvr_1_47_raw_log",
     ],
     deps = [
         "//:onvif_listener",

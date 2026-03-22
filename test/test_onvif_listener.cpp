@@ -306,8 +306,8 @@ static void test_cell_motion_events(const std::string& jsonl) {
 // ============================================================
 // Test: ThinginoCameraEmulator -- listener gives up after max failures
 // ============================================================
-static void test_thingino_graceful_stop() {
-  ThinginoCameraEmulator emu;
+static void test_thingino_graceful_stop(const std::string& jsonl) {
+  ThinginoCameraEmulator emu(jsonl);
   emu.start();
 
   onvif::CameraConfig cfg;
@@ -322,6 +322,79 @@ static void test_thingino_graceful_stop() {
 
   CHECK(r.timed_out, "expected timeout (no events) from a camera that always 404s");
   CHECK(r.events.empty(), "expected zero events from Thingino camera");
+}
+
+// ============================================================
+// Test: Html404CameraEmulator -- HTTP 200 with HTML body triggers XML
+// parse failures; listener gives up after max_consecutive_failures
+// ============================================================
+static void test_html_404_graceful_stop(const std::string& jsonl) {
+  Html404CameraEmulator emu(jsonl);
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                       = emu.local_address();
+  cfg.user                     = "admin";
+  cfg.password                 = "password";
+  cfg.retry_interval_sec       = 0;
+  cfg.max_consecutive_failures = 5;
+
+  auto r = collect({cfg}, 1, std::chrono::seconds(10));
+
+  CHECK(r.timed_out,    "expected timeout (no events) from HTML-404 camera");
+  CHECK(r.events.empty(), "expected zero events from HTML-404 camera");
+}
+
+// ============================================================
+// Test: CellMotionCamera with no motion events -- subscribes and renews
+// but PullMessages always return empty; listener stays alive
+// ============================================================
+static void test_cell_motion_no_events(const std::string& jsonl) {
+  CellMotionCameraEmulator emu(jsonl);
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                 = emu.local_address();
+  cfg.user               = "admin";
+  cfg.password           = "password";
+  cfg.retry_interval_sec = 1;
+
+  // Initialized events (not motion) are still delivered on first pull.
+  auto r = collect({cfg}, 3, std::chrono::seconds(30));
+
+  CHECK(!r.timed_out, "timed out waiting for Initialized events");
+  CHECK(r.events.size() >= 3, "expected >= 3 Initialized events");
+
+  for (const auto& ev : r.events) {
+    if (ev.topic.empty()) continue;  // skip empty PullMessages callbacks
+    CHECK(ev.property_op == "Initialized",
+          "expected only Initialized events, got: " + ev.property_op);
+  }
+}
+
+// ============================================================
+// Test: UNVR camera -- cell-motion camera from UNVR system
+// ============================================================
+static void test_unvr_cell_motion(const std::string& jsonl) {
+  CellMotionCameraEmulator emu(jsonl);
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                 = emu.local_address();
+  cfg.user               = "admin";
+  cfg.password           = "password";
+  cfg.retry_interval_sec = 1;
+
+  auto r = collect({cfg}, 5, std::chrono::seconds(30));
+
+  CHECK(!r.timed_out, "timed out waiting for UNVR camera events");
+  CHECK(r.events.size() >= 5, "expected >= 5 events from UNVR camera");
+
+  for (const auto& ev : r.events) {
+    CHECK(ev.property_op == "Initialized" || ev.property_op == "Changed",
+          "unexpected property_op: " + ev.property_op);
+    CHECK(ev.camera_ip == emu.local_address(), "camera_ip mismatch");
+  }
 }
 
 // ============================================================
@@ -383,29 +456,69 @@ static void test_both_cameras(const std::string& hikvision_jsonl,
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
-  if (argc < 4) {
-    std::cerr << "Usage: " << argv[0]
-              << " <hikvision_compatible.jsonl>"
-              << " <dahua_dh_sd4a425db_hny.jsonl>"
-              << " <cell_motion_camera.jsonl>\n"
-              << "  Each file is a per-camera raw ONVIF recording made with\n"
-              << "  OnvifListener::enable_raw_recording().\n";
+  if (argc < 15) {
+    std::cerr << "Usage: " << argv[0] << "\n"
+              << "  <hikvision_compatible.jsonl>\n"
+              << "  <dahua_dh_sd4a425db_hny.jsonl>\n"
+              << "  <cell_motion_camera.jsonl>\n"
+              << "  <cell_motion_no_events.jsonl>\n"
+              << "  <thingino_wyze.jsonl>\n"
+              << "  <html_404_camera.jsonl>\n"
+              << "  <unvr_78.jsonl>\n"
+              << "  <unvr_119.jsonl>\n"
+              << "  <unvr_173.jsonl>\n"
+              << "  <unvr_227.jsonl>\n"
+              << "  <unvr_245.jsonl>\n"
+              << "  <unvr_251.jsonl>\n"
+              << "  <unvr_1_45.jsonl>\n"
+              << "  <unvr_1_47.jsonl>\n";
     return 1;
   }
-  const std::string hikvision_jsonl  = argv[1];
-  const std::string dahua_jsonl      = argv[2];
-  const std::string cell_motion_jsonl = argv[3];
+  const std::string hikvision_jsonl      = argv[1];
+  const std::string dahua_jsonl          = argv[2];
+  const std::string cell_motion_jsonl    = argv[3];
+  const std::string cell_no_events_jsonl = argv[4];
+  const std::string thingino_jsonl       = argv[5];
+  const std::string html_404_jsonl       = argv[6];
+  const std::string unvr_78_jsonl        = argv[7];
+  const std::string unvr_119_jsonl       = argv[8];
+  const std::string unvr_173_jsonl       = argv[9];
+  const std::string unvr_227_jsonl       = argv[10];
+  const std::string unvr_245_jsonl       = argv[11];
+  const std::string unvr_251_jsonl       = argv[12];
+  const std::string unvr_1_45_jsonl      = argv[13];
+  const std::string unvr_1_47_jsonl      = argv[14];
 
   onvif::global_init();
 
-  run_test("hikvision_basic",          [&] { test_hikvision_basic(hikvision_jsonl); });
-  run_test("hikvision_changed_events", [&] { test_hikvision_changed_events(hikvision_jsonl); });
-  run_test("dahua_retries",            [&] { test_dahua_retries(dahua_jsonl); });
-  run_test("dahua_topics",             [&] { test_dahua_topics(dahua_jsonl); });
-  run_test("cell_motion_basic",        [&] { test_cell_motion_basic(cell_motion_jsonl); });
-  run_test("cell_motion_events",       [&] { test_cell_motion_events(cell_motion_jsonl); });
-  run_test("thingino_graceful_stop",   []  { test_thingino_graceful_stop(); });
-  run_test("both_cameras",             [&] { test_both_cameras(hikvision_jsonl, dahua_jsonl); });
+  run_test("hikvision_basic",
+           [&] { test_hikvision_basic(hikvision_jsonl); });
+  run_test("hikvision_changed_events",
+           [&] { test_hikvision_changed_events(hikvision_jsonl); });
+  run_test("dahua_retries",
+           [&] { test_dahua_retries(dahua_jsonl); });
+  run_test("dahua_topics",
+           [&] { test_dahua_topics(dahua_jsonl); });
+  run_test("cell_motion_basic",
+           [&] { test_cell_motion_basic(cell_motion_jsonl); });
+  run_test("cell_motion_events",
+           [&] { test_cell_motion_events(cell_motion_jsonl); });
+  run_test("cell_motion_no_events",
+           [&] { test_cell_motion_no_events(cell_no_events_jsonl); });
+  run_test("thingino_graceful_stop",
+           [&] { test_thingino_graceful_stop(thingino_jsonl); });
+  run_test("html_404_graceful_stop",
+           [&] { test_html_404_graceful_stop(html_404_jsonl); });
+  run_test("unvr_78",   [&] { test_unvr_cell_motion(unvr_78_jsonl); });
+  run_test("unvr_119",  [&] { test_unvr_cell_motion(unvr_119_jsonl); });
+  run_test("unvr_173",  [&] { test_unvr_cell_motion(unvr_173_jsonl); });
+  run_test("unvr_227",  [&] { test_cell_motion_no_events(unvr_227_jsonl); });
+  run_test("unvr_245",  [&] { test_unvr_cell_motion(unvr_245_jsonl); });
+  run_test("unvr_251",  [&] { test_unvr_cell_motion(unvr_251_jsonl); });
+  run_test("unvr_1_45", [&] { test_unvr_cell_motion(unvr_1_45_jsonl); });
+  run_test("unvr_1_47", [&] { test_unvr_cell_motion(unvr_1_47_jsonl); });
+  run_test("both_cameras",
+           [&] { test_both_cameras(hikvision_jsonl, dahua_jsonl); });
 
   onvif::global_cleanup();
 
