@@ -153,6 +153,38 @@ static std::string make_field_detector_response(
     "</s:Envelope>";
 }
 
+// CellMotionDetector style: tns1:RuleEngine/CellMotionDetector/Motion
+static std::string make_cell_motion_response(bool is_motion, const std::string& utc_time) {
+  const std::string val = is_motion ? "true" : "false";
+  return
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    "<s:Envelope"
+    " xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\""
+    " xmlns:wsnt=\"http://docs.oasis-open.org/wsn/b-2\""
+    " xmlns:tev=\"http://www.onvif.org/ver10/events/wsdl\""
+    " xmlns:tt=\"http://www.onvif.org/ver10/schema\">"
+    "<s:Body>"
+    "<tev:PullMessagesResponse>"
+    "<wsnt:NotificationMessage>"
+    "<wsnt:Topic>tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>"
+    "<wsnt:Message>"
+    "<tt:Message UtcTime=\"" + utc_time + "\" PropertyOperation=\"Changed\">"
+    "<tt:Source>"
+    "<tt:SimpleItem Name=\"VideoSourceConfigurationToken\" Value=\"00000\"/>"
+    "<tt:SimpleItem Name=\"VideoAnalyticsConfigurationToken\" Value=\"00000\"/>"
+    "<tt:SimpleItem Name=\"Rule\" Value=\"00000\"/>"
+    "</tt:Source>"
+    "<tt:Data>"
+    "<tt:SimpleItem Name=\"IsMotion\" Value=\"" + val + "\"/>"
+    "</tt:Data>"
+    "</tt:Message>"
+    "</wsnt:Message>"
+    "</wsnt:NotificationMessage>"
+    "</tev:PullMessagesResponse>"
+    "</s:Body>"
+    "</s:Envelope>";
+}
+
 // Camera 109 style: tns1:UserAlarm/IVA/HumanShapeDetect
 static std::string make_human_shape_response(bool state, const std::string& utc_time) {
   const std::string val = state ? "true" : "false";
@@ -572,20 +604,103 @@ static void test_buffer_padding(const std::string& db_path,
 }
 
 // ============================================================
+// CellMotionDetector classification test
+//
+// Verifies that tns1:RuleEngine/CellMotionDetector/Motion events are
+// classified as person detections (IsMotion=true → start, false → end).
+// ============================================================
+static void test_cell_motion_classification(const std::string& db_path,
+                                             const std::string& ubv_dir) {
+  auto rec_or = onvif::DetectionRecorder::Create(onvif::DbBackend::SQLite, db_path);
+  if (!rec_or.ok()) {
+    CHECK(false, std::string("DetectionRecorder::Create failed: ")
+                 + std::string(rec_or.status().message()));
+    return;
+  }
+  onvif::DetectionRecorder& recorder = **rec_or;
+  recorder.set_ubv_dir(ubv_dir);
+
+  // Single camera emulator with scripted cell-motion responses.
+  const std::string real_ip = "192.168.1.200";
+  auto jpeg = load_file(source_dir() + "testdata/snapshot_108.jpg");
+  SnapshotSyntheticEmulator emu(real_ip,
+    {make_cell_motion_response(true,  "2026-03-21T10:00:00Z"),
+     make_cell_motion_response(false, "2026-03-21T10:00:05Z")},
+    jpeg);
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                 = emu.local_address();
+  cfg.user               = "admin";
+  cfg.password           = "password";
+  cfg.snapshot_url       = emu.snapshot_url();
+  cfg.retry_interval_sec = 1;
+
+  recorder.set_snapshot(cfg);
+
+  std::mutex              mu;
+  std::condition_variable cv;
+  std::atomic<int>        events_seen{0};
+  const int               needed = 2;
+
+  onvif::OnvifListener listener;
+  listener.add_camera(cfg);
+
+  std::thread t([&] {
+    listener.run([&](const onvif::OnvifEvent& ev) {
+      recorder.on_event(ev);
+      if (!ev.topic.empty())
+        if (++events_seen >= needed) cv.notify_one();
+    });
+  });
+
+  bool timed_out;
+  {
+    std::unique_lock<std::mutex> lk(mu);
+    timed_out = !cv.wait_for(lk, std::chrono::seconds(30),
+                              [&] { return events_seen.load() >= needed; });
+  }
+
+  listener.stop();
+  t.join();
+
+  CHECK(!timed_out, "timed out waiting for cell-motion events");
+  CHECK(events_seen.load() >= 2, "expected >= 2 cell-motion events");
+
+  sqlite3* db = nullptr;
+  sqlite3_open(db_path.c_str(), &db);
+
+  int events = db_count(db, "SELECT COUNT(*) FROM events;");
+  CHECK(events == 1, "expected 1 detection interval, got " + std::to_string(events));
+
+  int person_sdo = db_count(db,
+    "SELECT COUNT(*) FROM smartDetectObjects WHERE type='person';");
+  CHECK(person_sdo == 1,
+        "expected 1 person SDO from CellMotionDetector, got "
+        + std::to_string(person_sdo));
+
+  sqlite3_close(db);
+}
+
+// ============================================================
 // main
 // ============================================================
 int main() {
-  const std::string db_path     = "/tmp/test_detections.db";
-  const std::string db_path_buf = "/tmp/test_detections_buf.db";
-  const std::string ubv_dir     = "/tmp/test_dr_thumbs";
+  const std::string db_path      = "/tmp/test_detections.db";
+  const std::string db_path_buf  = "/tmp/test_detections_buf.db";
+  const std::string db_path_cell = "/tmp/test_detections_cell.db";
+  const std::string ubv_dir      = "/tmp/test_dr_thumbs";
 
   std::remove(db_path.c_str());
   std::remove(db_path_buf.c_str());
+  std::remove(db_path_cell.c_str());
 
   onvif::global_init();
 
-  run_test("detection_e2e",    [&] { test_detection_e2e(db_path, ubv_dir); });
-  run_test("buffer_padding",   [&] { test_buffer_padding(db_path_buf, ubv_dir); });
+  run_test("detection_e2e",             [&] { test_detection_e2e(db_path, ubv_dir); });
+  run_test("buffer_padding",            [&] { test_buffer_padding(db_path_buf, ubv_dir); });
+  run_test("cell_motion_classification",
+           [&] { test_cell_motion_classification(db_path_cell, ubv_dir); });
 
   onvif::global_cleanup();
 

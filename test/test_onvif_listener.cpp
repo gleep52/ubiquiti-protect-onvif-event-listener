@@ -242,6 +242,89 @@ static void test_dahua_topics(const std::string& jsonl) {
 }
 
 // ============================================================
+// Test: CellMotionCamera -- subscribes immediately, receives motion events
+// ============================================================
+static void test_cell_motion_basic(const std::string& jsonl) {
+  CellMotionCameraEmulator emu(jsonl);
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                 = emu.local_address();
+  cfg.user               = "admin";
+  cfg.password           = "password";
+  cfg.retry_interval_sec = 1;
+
+  auto r = collect({cfg}, 5, std::chrono::seconds(30));
+
+  CHECK(!r.timed_out, "timed out waiting for events");
+  CHECK(r.events.size() >= 5, "expected >= 5 events");
+
+  for (const auto& ev : r.events) {
+    CHECK(!ev.topic.empty(), "event topic must not be empty");
+    CHECK(ev.property_op == "Initialized" || ev.property_op == "Changed",
+          "unexpected property_op: " + ev.property_op);
+    CHECK(ev.camera_ip == emu.local_address(),
+          "camera_ip mismatch: " + ev.camera_ip);
+  }
+}
+
+// ============================================================
+// Test: CellMotionCamera -- Changed events carry IsMotion data
+// ============================================================
+static void test_cell_motion_events(const std::string& jsonl) {
+  CellMotionCameraEmulator emu(jsonl);
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                 = emu.local_address();
+  cfg.user               = "admin";
+  cfg.password           = "password";
+  cfg.retry_interval_sec = 1;
+
+  // Collect enough to cycle past the Initialized burst and see Changed events
+  auto r = collect({cfg}, 30, std::chrono::seconds(60));
+
+  CHECK(!r.timed_out, "timed out waiting for events");
+
+  bool saw_cell_motion = false;
+  bool saw_changed     = false;
+  for (const auto& ev : r.events) {
+    if (ev.topic == "tns1:RuleEngine/CellMotionDetector/Motion") {
+      saw_cell_motion = true;
+      if (ev.property_op == "Changed") {
+        saw_changed = true;
+        // IsMotion must be present in the data map
+        CHECK(ev.data.count("IsMotion") > 0,
+              "CellMotionDetector/Motion Changed event missing IsMotion data");
+      }
+    }
+  }
+  CHECK(saw_cell_motion, "expected CellMotionDetector/Motion events");
+  CHECK(saw_changed,     "expected at least one Changed (motion) event");
+}
+
+// ============================================================
+// Test: ThinginoCameraEmulator -- listener gives up after max failures
+// ============================================================
+static void test_thingino_graceful_stop() {
+  ThinginoCameraEmulator emu;
+  emu.start();
+
+  onvif::CameraConfig cfg;
+  cfg.ip                      = emu.local_address();
+  cfg.user                    = "thingino";
+  cfg.password                = "password";
+  cfg.retry_interval_sec      = 0;  // no delay between retries in test
+  cfg.max_consecutive_failures = 5;
+
+  // The listener should give up after 5 consecutive 404s and emit no events.
+  auto r = collect({cfg}, 1, std::chrono::seconds(10));
+
+  CHECK(r.timed_out, "expected timeout (no events) from a camera that always 404s");
+  CHECK(r.events.empty(), "expected zero events from Thingino camera");
+}
+
+// ============================================================
 // Test: Both cameras concurrently -- events arrive from both
 // ============================================================
 static void test_both_cameras(const std::string& hikvision_jsonl,
@@ -300,15 +383,18 @@ static void test_both_cameras(const std::string& hikvision_jsonl,
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
-  if (argc < 3) {
+  if (argc < 4) {
     std::cerr << "Usage: " << argv[0]
-              << " <hikvision_compatible.jsonl> <dahua_dh_sd4a425db_hny.jsonl>\n"
+              << " <hikvision_compatible.jsonl>"
+              << " <dahua_dh_sd4a425db_hny.jsonl>"
+              << " <cell_motion_camera.jsonl>\n"
               << "  Each file is a per-camera raw ONVIF recording made with\n"
               << "  OnvifListener::enable_raw_recording().\n";
     return 1;
   }
-  const std::string hikvision_jsonl = argv[1];
-  const std::string dahua_jsonl     = argv[2];
+  const std::string hikvision_jsonl  = argv[1];
+  const std::string dahua_jsonl      = argv[2];
+  const std::string cell_motion_jsonl = argv[3];
 
   onvif::global_init();
 
@@ -316,6 +402,9 @@ int main(int argc, char* argv[]) {
   run_test("hikvision_changed_events", [&] { test_hikvision_changed_events(hikvision_jsonl); });
   run_test("dahua_retries",            [&] { test_dahua_retries(dahua_jsonl); });
   run_test("dahua_topics",             [&] { test_dahua_topics(dahua_jsonl); });
+  run_test("cell_motion_basic",        [&] { test_cell_motion_basic(cell_motion_jsonl); });
+  run_test("cell_motion_events",       [&] { test_cell_motion_events(cell_motion_jsonl); });
+  run_test("thingino_graceful_stop",   []  { test_thingino_graceful_stop(); });
   run_test("both_cameras",             [&] { test_both_cameras(hikvision_jsonl, dahua_jsonl); });
 
   onvif::global_cleanup();

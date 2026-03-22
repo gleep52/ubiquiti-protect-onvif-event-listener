@@ -64,6 +64,43 @@ class HikvisionCompatibleEmulator : public OnvifCameraEmulator {
 };
 
 // ============================================================
+// CellMotionCameraEmulator -- Amcrest / Lorex / Dahua basic-motion camera
+// (subscribes immediately, emits CellMotionDetector/Motion + MotionAlarm topics)
+// ============================================================
+class CellMotionCameraEmulator : public OnvifCameraEmulator {
+ public:
+  explicit CellMotionCameraEmulator(const std::string& jsonl_path);
+
+ protected:
+  std::pair<int, std::string> handle(
+    const std::string& path,
+    const std::string& soap_action,
+    const std::string& body) override;
+
+ private:
+  RecordedSession session_;
+  std::size_t     create_idx_{0};
+  std::size_t     pull_idx_{0};
+  std::size_t     renew_idx_{0};
+  std::mutex      mu_;
+};
+
+// ============================================================
+// ThinginoCameraEmulator -- Wyze cam with Thingino open-source firmware
+// (ONVIF event service endpoint absent; always returns HTTP 404)
+// ============================================================
+class ThinginoCameraEmulator : public OnvifCameraEmulator {
+ public:
+  ThinginoCameraEmulator();
+
+ protected:
+  std::pair<int, std::string> handle(
+    const std::string& path,
+    const std::string& soap_action,
+    const std::string& body) override;
+};
+
+// ============================================================
 // DahuaSD4A425DBEmulator -- Dahua DH-SD4A425DB-HNY PTZ camera
 // (returns 400 x N then 200 for subscribe, motion/alarm topics)
 // ============================================================

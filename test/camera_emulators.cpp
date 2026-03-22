@@ -215,6 +215,52 @@ std::pair<int, std::string> HikvisionCompatibleEmulator::handle(
 }
 
 // ============================================================
+// CellMotionCameraEmulator
+// ============================================================
+CellMotionCameraEmulator::CellMotionCameraEmulator(const std::string& jsonl_path)
+  : OnvifCameraEmulator("10.0.0.113") {
+  session_ = RecordedSession::from_jsonl(jsonl_path);
+}
+
+std::pair<int, std::string> CellMotionCameraEmulator::handle(
+  const std::string& /*path*/,
+  const std::string& soap_action,
+  const std::string& /*body*/) {
+  std::lock_guard<std::mutex> lk(mu_);
+  const auto tail = action_tail(soap_action);
+
+  std::pair<int, std::string> resp;
+  if      (tail == "CreatePullPointSubscriptionRequest")
+    resp = next_clamp(session_.create_sub, create_idx_);
+  else if (tail == "PullMessagesRequest")
+    resp = next_cycle(session_.pull, pull_idx_);
+  else if (tail == "RenewRequest")
+    resp = next_clamp(session_.renew, renew_idx_);
+  else
+    resp = {400, ""};
+
+  resp.second = rewrite_urls(resp.second);
+  return resp;
+}
+
+// ============================================================
+// ThinginoCameraEmulator
+// ============================================================
+ThinginoCameraEmulator::ThinginoCameraEmulator()
+  : OnvifCameraEmulator("10.0.10.30") {}
+
+std::pair<int, std::string> ThinginoCameraEmulator::handle(
+  const std::string& /*path*/,
+  const std::string& /*soap_action*/,
+  const std::string& /*body*/) {
+  return {404,
+    "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n"
+    "<BODY><H1>404 Not Found</H1>\n"
+    "The requested URL was not found\n"
+    "</BODY></HTML>"};
+}
+
+// ============================================================
 // DahuaSD4A425DBEmulator
 // ============================================================
 DahuaSD4A425DBEmulator::DahuaSD4A425DBEmulator(const std::string& jsonl_path)

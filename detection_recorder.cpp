@@ -72,6 +72,14 @@ std::optional<Detection> classify(const OnvifEvent& ev) {
     return Detection{"human", it->second == "true", ev.event_time};
   }
 
+  // --- Generic CellMotionDetector/Motion (Amcrest, Lorex, Dahua, etc.) ---
+  // Basic pixel-change motion; no object class available so treated as person.
+  if (ev.topic == "tns1:RuleEngine/CellMotionDetector/Motion") {
+    auto it = ev.data.find("IsMotion");
+    if (it == ev.data.end()) return {};
+    return Detection{"human", it->second == "true", ev.event_time};
+  }
+
   return {};
 }
 
