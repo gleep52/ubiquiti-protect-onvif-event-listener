@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,12 +40,21 @@ enum class DbBackend { SQLite, PostgreSQL };
  *
  * Supported ONVIF event formats
  * ------------------------------
- * Camera 108 style  (tns1:RuleEngine/FieldDetector/ObjectsInside)
- *   source["Rule"]     = "Human" | "Vehicle"
- *   data["IsInside"]   = "true"  | "false"
+ * AI events (suppress basic motion from the same camera once seen):
+ *   tns1:RuleEngine/FieldDetector/ObjectsInside  (Hikvision)
+ *     source["Rule"]   = "Human" | "Vehicle"
+ *     data["IsInside"] = "true"  | "false"
  *
- * Camera 109 style  (tns1:UserAlarm/IVA/HumanShapeDetect)
- *   data["State"]      = "true"  | "false"   (always maps to "person")
+ *   tns1:UserAlarm/IVA/HumanShapeDetect  (Dahua)
+ *     data["State"]    = "true"  | "false"   (always maps to "person")
+ *
+ * Basic motion events (suppressed when camera emits AI events):
+ *   tns1:RuleEngine/CellMotionDetector/Motion  (Amcrest, Lorex, UNVR etc.)
+ *     data["IsMotion"] = "true"  | "false"   (maps to "person")
+ *
+ * Fallback motion (suppressed when camera emits CellMotionDetector or AI):
+ *   tns1:VideoSource/MotionAlarm
+ *     data["State"]    = "true"  | "false"   (maps to "person")
  *
  * Detection type mapping
  * ----------------------
@@ -213,6 +223,16 @@ class DetectionRecorder {
   // Tracks the UUID of each open (not-yet-ended) event row in `events`.
   // Key: (camera_ip, detection_type)
   std::map<std::pair<std::string, std::string>, std::string> open_;
+
+  // Cameras that have emitted at least one AI-level detection event
+  // (FieldDetector or HumanShapeDetect).  CellMotionDetector events from
+  // these cameras are suppressed to avoid PTZ-patrol false positives.
+  std::set<std::string> ai_capable_cameras_;
+
+  // Cameras that have emitted at least one CellMotionDetector event.
+  // VideoSource/MotionAlarm events from these cameras are suppressed to
+  // avoid double-counting (both topics fire simultaneously on most cameras).
+  std::set<std::string> cell_motion_cameras_;
 };
 
 }  // namespace onvif

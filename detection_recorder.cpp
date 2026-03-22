@@ -80,6 +80,16 @@ std::optional<Detection> classify(const OnvifEvent& ev) {
     return Detection{"human", it->second == "true", ev.event_time};
   }
 
+  // --- VideoSource/MotionAlarm fallback ---
+  // Fires on most cameras alongside CellMotionDetector.  Used only for
+  // cameras that have neither CellMotionDetector nor AI events (suppression
+  // is handled in on_event()).
+  if (ev.topic == "tns1:VideoSource/MotionAlarm") {
+    auto it = ev.data.find("State");
+    if (it == ev.data.end()) return {};
+    return Detection{"human", it->second == "true", ev.event_time};
+  }
+
   return {};
 }
 
@@ -637,6 +647,27 @@ void DetectionRecorder::set_ubv_dir(const std::string& dir) {
 }
 
 void DetectionRecorder::on_event(const OnvifEvent& ev) {
+  // --- Per-camera capability tracking and basic-motion suppression ---
+  // AI events (FieldDetector, HumanShapeDetect) mark the camera as AI-capable
+  // so that subsequent CellMotionDetector events are suppressed.  This avoids
+  // false positives from PTZ patrol sweeps on cameras like the Dahua SD4A425DB
+  // that emit CellMotionDetector/Motion during every pan.
+  // MotionAlarm fires alongside CellMotionDetector on virtually all cameras;
+  // it is only used as a fallback for cameras that have neither.
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (ev.topic == "tns1:RuleEngine/FieldDetector/ObjectsInside" ||
+        ev.topic == "tns1:UserAlarm/IVA/HumanShapeDetect") {
+      ai_capable_cameras_.insert(ev.camera_ip);
+    } else if (ev.topic == "tns1:RuleEngine/CellMotionDetector/Motion") {
+      if (ai_capable_cameras_.count(ev.camera_ip)) return;
+      cell_motion_cameras_.insert(ev.camera_ip);
+    } else if (ev.topic == "tns1:VideoSource/MotionAlarm") {
+      if (ai_capable_cameras_.count(ev.camera_ip) ||
+          cell_motion_cameras_.count(ev.camera_ip)) return;
+    }
+  }
+
   auto det = classify(ev);
   if (!det) return;
 

@@ -185,6 +185,36 @@ static std::string make_cell_motion_response(bool is_motion, const std::string& 
     "</s:Envelope>";
 }
 
+// Fallback: tns1:VideoSource/MotionAlarm
+static std::string make_motion_alarm_response(bool state, const std::string& utc_time) {
+  const std::string val = state ? "true" : "false";
+  return
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    "<s:Envelope"
+    " xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\""
+    " xmlns:wsnt=\"http://docs.oasis-open.org/wsn/b-2\""
+    " xmlns:tev=\"http://www.onvif.org/ver10/events/wsdl\""
+    " xmlns:tt=\"http://www.onvif.org/ver10/schema\">"
+    "<s:Body>"
+    "<tev:PullMessagesResponse>"
+    "<wsnt:NotificationMessage>"
+    "<wsnt:Topic>tns1:VideoSource/MotionAlarm</wsnt:Topic>"
+    "<wsnt:Message>"
+    "<tt:Message UtcTime=\"" + utc_time + "\" PropertyOperation=\"Changed\">"
+    "<tt:Source>"
+    "<tt:SimpleItem Name=\"VideoSourceConfigurationToken\" Value=\"VideoSourceMain\"/>"
+    "</tt:Source>"
+    "<tt:Data>"
+    "<tt:SimpleItem Name=\"State\" Value=\"" + val + "\"/>"
+    "</tt:Data>"
+    "</tt:Message>"
+    "</wsnt:Message>"
+    "</wsnt:NotificationMessage>"
+    "</tev:PullMessagesResponse>"
+    "</s:Body>"
+    "</s:Envelope>";
+}
+
 // Camera 109 style: tns1:UserAlarm/IVA/HumanShapeDetect
 static std::string make_human_shape_response(bool state, const std::string& utc_time) {
   const std::string val = state ? "true" : "false";
@@ -604,6 +634,47 @@ static void test_buffer_padding(const std::string& db_path,
 }
 
 // ============================================================
+// Run a single-camera scripted listener test.
+// Drives the given emulator until `needed` non-empty-topic events arrive.
+// Returns false on timeout.
+static bool run_single_camera(SnapshotSyntheticEmulator& emu,
+                               onvif::DetectionRecorder&  recorder,
+                               int                        needed) {
+  onvif::CameraConfig cfg;
+  cfg.ip                 = emu.local_address();
+  cfg.user               = "admin";
+  cfg.password           = "password";
+  cfg.snapshot_url       = emu.snapshot_url();
+  cfg.retry_interval_sec = 1;
+  recorder.set_snapshot(cfg);
+
+  std::mutex              mu;
+  std::condition_variable cv;
+  std::atomic<int>        events_seen{0};
+
+  onvif::OnvifListener listener;
+  listener.add_camera(cfg);
+
+  std::thread t([&] {
+    listener.run([&](const onvif::OnvifEvent& ev) {
+      recorder.on_event(ev);
+      if (!ev.topic.empty())
+        if (++events_seen >= needed) cv.notify_one();
+    });
+  });
+
+  bool timed_out;
+  {
+    std::unique_lock<std::mutex> lk(mu);
+    timed_out = !cv.wait_for(lk, std::chrono::seconds(30),
+                              [&] { return events_seen.load() >= needed; });
+  }
+  listener.stop();
+  t.join();
+  return !timed_out;
+}
+
+// ============================================================
 // CellMotionDetector classification test
 //
 // Verifies that tns1:RuleEngine/CellMotionDetector/Motion events are
@@ -683,17 +754,169 @@ static void test_cell_motion_classification(const std::string& db_path,
 }
 
 // ============================================================
+// MotionAlarm fallback test
+//
+// A camera that only emits VideoSource/MotionAlarm (no CellMotionDetector,
+// no AI events) should still produce a detection.
+// ============================================================
+static void test_motion_alarm_fallback(const std::string& db_path,
+                                        const std::string& ubv_dir) {
+  auto rec_or = onvif::DetectionRecorder::Create(onvif::DbBackend::SQLite, db_path);
+  if (!rec_or.ok()) {
+    CHECK(false, std::string("DetectionRecorder::Create failed: ")
+                 + std::string(rec_or.status().message()));
+    return;
+  }
+  onvif::DetectionRecorder& recorder = **rec_or;
+  recorder.set_ubv_dir(ubv_dir);
+
+  auto jpeg = load_file(source_dir() + "testdata/snapshot_108.jpg");
+  SnapshotSyntheticEmulator emu("192.168.1.201",
+    {make_motion_alarm_response(true,  "2026-03-22T10:00:00Z"),
+     make_motion_alarm_response(false, "2026-03-22T10:00:05Z")},
+    jpeg);
+  emu.start();
+
+  bool ok = run_single_camera(emu, recorder, 2);
+  CHECK(ok, "motion_alarm_fallback: timed out");
+
+  sqlite3* db = nullptr;
+  sqlite3_open(db_path.c_str(), &db);
+
+  int events = db_count(db, "SELECT COUNT(*) FROM events;");
+  CHECK(events == 1,
+        "motion_alarm_fallback: expected 1 detection, got " + std::to_string(events));
+
+  int person_sdo = db_count(db,
+    "SELECT COUNT(*) FROM smartDetectObjects WHERE type='person';");
+  CHECK(person_sdo == 1,
+        "motion_alarm_fallback: expected 1 person SDO, got "
+        + std::to_string(person_sdo));
+
+  sqlite3_close(db);
+}
+
+// ============================================================
+// CellMotionDetector suppresses MotionAlarm test
+//
+// When both CellMotionDetector and MotionAlarm fire for the same camera,
+// only CellMotionDetector should produce a detection (MotionAlarm is suppressed).
+// ============================================================
+static void test_cell_motion_suppresses_alarm(const std::string& db_path,
+                                               const std::string& ubv_dir) {
+  auto rec_or = onvif::DetectionRecorder::Create(onvif::DbBackend::SQLite, db_path);
+  if (!rec_or.ok()) {
+    CHECK(false, std::string("DetectionRecorder::Create failed: ")
+                 + std::string(rec_or.status().message()));
+    return;
+  }
+  onvif::DetectionRecorder& recorder = **rec_or;
+  recorder.set_ubv_dir(ubv_dir);
+
+  // Script: CellMotion(true) then MotionAlarm(true) then both false.
+  // MotionAlarm events should be silently ignored.
+  auto jpeg = load_file(source_dir() + "testdata/snapshot_108.jpg");
+  SnapshotSyntheticEmulator emu("192.168.1.202",
+    {make_cell_motion_response(true,  "2026-03-22T10:01:00Z"),
+     make_motion_alarm_response(true,  "2026-03-22T10:01:00Z"),
+     make_cell_motion_response(false, "2026-03-22T10:01:05Z"),
+     make_motion_alarm_response(false, "2026-03-22T10:01:05Z")},
+    jpeg);
+  emu.start();
+
+  bool ok = run_single_camera(emu, recorder, 4);
+  CHECK(ok, "cell_motion_suppresses_alarm: timed out");
+
+  sqlite3* db = nullptr;
+  sqlite3_open(db_path.c_str(), &db);
+
+  int events = db_count(db, "SELECT COUNT(*) FROM events;");
+  CHECK(events == 1,
+        "cell_motion_suppresses_alarm: expected 1 detection (not 2), got "
+        + std::to_string(events));
+
+  int open_events = db_count(db,
+    "SELECT COUNT(*) FROM events WHERE \"end\" IS NULL;");
+  CHECK(open_events == 0,
+        "cell_motion_suppresses_alarm: expected 0 open events, got "
+        + std::to_string(open_events));
+
+  sqlite3_close(db);
+}
+
+// ============================================================
+// AI events suppress CellMotionDetector test
+//
+// When a camera emits both AI events (FieldDetector) and CellMotionDetector,
+// only the AI events should produce a detection (CellMotionDetector suppressed).
+// This exercises the PTZ-patrol false-positive suppression path.
+// ============================================================
+static void test_ai_suppresses_cell_motion(const std::string& db_path,
+                                            const std::string& ubv_dir) {
+  auto rec_or = onvif::DetectionRecorder::Create(onvif::DbBackend::SQLite, db_path);
+  if (!rec_or.ok()) {
+    CHECK(false, std::string("DetectionRecorder::Create failed: ")
+                 + std::string(rec_or.status().message()));
+    return;
+  }
+  onvif::DetectionRecorder& recorder = **rec_or;
+  recorder.set_ubv_dir(ubv_dir);
+
+  // Script: AI event first, then CellMotion events.
+  // CellMotion should be suppressed after the first AI event is seen.
+  auto jpeg = load_file(source_dir() + "testdata/snapshot_108.jpg");
+  SnapshotSyntheticEmulator emu("192.168.1.203",
+    {make_field_detector_response("Human", true,  "2026-03-22T10:02:00Z"),
+     make_cell_motion_response(true,              "2026-03-22T10:02:00Z"),
+     make_field_detector_response("Human", false, "2026-03-22T10:02:05Z"),
+     make_cell_motion_response(false,             "2026-03-22T10:02:05Z")},
+    jpeg);
+  emu.start();
+
+  bool ok = run_single_camera(emu, recorder, 4);
+  CHECK(ok, "ai_suppresses_cell_motion: timed out");
+
+  sqlite3* db = nullptr;
+  sqlite3_open(db_path.c_str(), &db);
+
+  int events = db_count(db, "SELECT COUNT(*) FROM events;");
+  CHECK(events == 1,
+        "ai_suppresses_cell_motion: expected 1 detection (AI only, not 2), got "
+        + std::to_string(events));
+
+  int open_events = db_count(db,
+    "SELECT COUNT(*) FROM events WHERE \"end\" IS NULL;");
+  CHECK(open_events == 0,
+        "ai_suppresses_cell_motion: expected 0 open events, got "
+        + std::to_string(open_events));
+
+  int person_sdo = db_count(db,
+    "SELECT COUNT(*) FROM smartDetectObjects WHERE type='person';");
+  CHECK(person_sdo == 1,
+        "ai_suppresses_cell_motion: expected 1 person SDO, got "
+        + std::to_string(person_sdo));
+
+  sqlite3_close(db);
+}
+
+// ============================================================
 // main
 // ============================================================
 int main() {
-  const std::string db_path      = "/tmp/test_detections.db";
-  const std::string db_path_buf  = "/tmp/test_detections_buf.db";
-  const std::string db_path_cell = "/tmp/test_detections_cell.db";
-  const std::string ubv_dir      = "/tmp/test_dr_thumbs";
+  const std::string db_path           = "/tmp/test_detections.db";
+  const std::string db_path_buf       = "/tmp/test_detections_buf.db";
+  const std::string db_path_cell      = "/tmp/test_detections_cell.db";
+  const std::string db_path_alarm     = "/tmp/test_detections_alarm.db";
+  const std::string db_path_suppress  = "/tmp/test_detections_suppress.db";
+  const std::string db_path_ai_sup    = "/tmp/test_detections_ai_sup.db";
+  const std::string ubv_dir           = "/tmp/test_dr_thumbs";
 
   std::remove(db_path.c_str());
   std::remove(db_path_buf.c_str());
   std::remove(db_path_cell.c_str());
+  std::remove(db_path_alarm.c_str());
+  std::remove(db_path_suppress.c_str());
+  std::remove(db_path_ai_sup.c_str());
 
   onvif::global_init();
 
@@ -701,6 +924,12 @@ int main() {
   run_test("buffer_padding",            [&] { test_buffer_padding(db_path_buf, ubv_dir); });
   run_test("cell_motion_classification",
            [&] { test_cell_motion_classification(db_path_cell, ubv_dir); });
+  run_test("motion_alarm_fallback",
+           [&] { test_motion_alarm_fallback(db_path_alarm, ubv_dir); });
+  run_test("cell_motion_suppresses_alarm",
+           [&] { test_cell_motion_suppresses_alarm(db_path_suppress, ubv_dir); });
+  run_test("ai_suppresses_cell_motion",
+           [&] { test_ai_suppresses_cell_motion(db_path_ai_sup, ubv_dir); });
 
   onvif::global_cleanup();
 
