@@ -50,26 +50,45 @@ struct Detection {
 };
 
 std::optional<Detection> classify(const OnvifEvent& ev) {
-  // --- Camera 108 style: FieldDetector ObjectsInside ---
+  // --- FieldDetector ObjectsInside (Hikvision IVS rules) ---
   if (ev.topic == "tns1:RuleEngine/FieldDetector/ObjectsInside") {
-    auto rule_it   = ev.source.find("Rule");
+    auto rule_it = ev.source.find("Rule");
     auto inside_it = ev.data.find("IsInside");
     if (rule_it == ev.source.end() || inside_it == ev.data.end())
       return {};
-
     std::string type;
-    if      (rule_it->second == "Human")   type = "human";
+    if (rule_it->second == "Human") type = "human";
     else if (rule_it->second == "Vehicle") type = "vehicle";
     else return {};
-
     return Detection{type, inside_it->second == "true", ev.event_time};
   }
 
-  // --- Camera 109 style: HumanShapeDetect ---
+  // --- HumanShapeDetect (Hikvision knockoff / Dahua, e.g. .143) ---
   if (ev.topic == "tns1:UserAlarm/IVA/HumanShapeDetect") {
     auto it = ev.data.find("State");
     if (it == ev.data.end()) return {};
     return Detection{"human", it->second == "true", ev.event_time};
+  }
+
+  // --- VehicleDetect (Hikvision knockoff / Dahua, e.g. .143) ---
+  if (ev.topic == "tns1:VehicleAlarm/IVB/VehicleDetect") {
+    auto it = ev.data.find("State");
+    if (it == ev.data.end()) return {};
+    return Detection{"vehicle", it->second == "true", ev.event_time};
+  }
+
+  // --- Reolink: PeopleDetect (MyRuleDetector, e.g. .123) ---
+  if (ev.topic == "tns1:RuleEngine/MyRuleDetector/PeopleDetect") {
+    auto it = ev.data.find("State");
+    if (it == ev.data.end()) return {};
+    return Detection{"human", it->second == "true", ev.event_time};
+  }
+
+  // --- Reolink: VehicleDetect (MyRuleDetector, e.g. .123) ---
+  if (ev.topic == "tns1:RuleEngine/MyRuleDetector/VehicleDetect") {
+    auto it = ev.data.find("State");
+    if (it == ev.data.end()) return {};
+    return Detection{"vehicle", it->second == "true", ev.event_time};
   }
 
   // --- Generic CellMotionDetector/Motion (Amcrest, Lorex, Dahua, etc.) ---
@@ -81,7 +100,7 @@ std::optional<Detection> classify(const OnvifEvent& ev) {
   }
 
   // --- VideoSource/MotionAlarm fallback ---
-  // Fires on most cameras alongside CellMotionDetector.  Used only for
+  // Fires on most cameras alongside CellMotionDetector. Used only for
   // cameras that have neither CellMotionDetector nor AI events (suppression
   // is handled in on_event()).
   if (ev.topic == "tns1:VideoSource/MotionAlarm") {
