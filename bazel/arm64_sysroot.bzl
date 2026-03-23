@@ -460,8 +460,8 @@ def _aarch64_toolchain_config_impl(ctx):
             # libpq-fe.h is under a postgresql/ subdirectory
             sysroot + "/usr/include/postgresql",
             # clang's own internal headers (builtins, intrinsics, etc.)
-            "/usr/lib/llvm-14/lib/clang/14.0.0/include",
-            "/usr/lib/clang/14.0.0/include",
+            "/usr/lib/llvm-14/lib/clang/14.0.6/include",
+            "/usr/lib/clang/14.0.6/include",
         ],
     )
 
