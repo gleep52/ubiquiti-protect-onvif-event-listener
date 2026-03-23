@@ -761,6 +761,7 @@ void DetectionRecorder::on_event(const OnvifEvent& ev) {
     db_->update_event_end(it->second, end_ms, now_str);
     open_.erase(it);
   }
-}
+}}
+
 
 }  // namespace onvif
