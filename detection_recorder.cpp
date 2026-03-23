@@ -675,16 +675,19 @@ void DetectionRecorder::on_event(const OnvifEvent& ev) {
   // it is only used as a fallback for cameras that have neither.
   {
     std::lock_guard<std::mutex> lk(mu_);
-    if (ev.topic == "tns1:RuleEngine/FieldDetector/ObjectsInside" ||
-        ev.topic == "tns1:UserAlarm/IVA/HumanShapeDetect") {
-      ai_capable_cameras_.insert(ev.camera_ip);
-    } else if (ev.topic == "tns1:RuleEngine/CellMotionDetector/Motion") {
-      if (ai_capable_cameras_.count(ev.camera_ip)) return;
-      cell_motion_cameras_.insert(ev.camera_ip);
-    } else if (ev.topic == "tns1:VideoSource/MotionAlarm") {
-      if (ai_capable_cameras_.count(ev.camera_ip) ||
-          cell_motion_cameras_.count(ev.camera_ip)) return;
-    }
+    if ((ev.topic == "tns1:RuleEngine/FieldDetector/ObjectsInside" ||
+       ev.topic == "tns1:UserAlarm/IVA/HumanShapeDetect" ||
+       ev.topic == "tns1:VehicleAlarm/IVB/VehicleDetect") &&
+      ev.property_op != "Initialized") {
+    ai_capable_cameras_.insert(ev.camera_ip);
+  } else if (ev.topic == "tns1:RuleEngine/CellMotionDetector/Motion" &&
+             ev.property_op != "Initialized") {
+    if (ai_capable_cameras_.count(ev.camera_ip)) return;
+    cell_motion_cameras_.insert(ev.camera_ip);
+  } else if (ev.topic == "tns1:VideoSource/MotionAlarm" &&
+             ev.property_op != "Initialized") {
+    if (ai_capable_cameras_.count(ev.camera_ip) ||
+        cell_motion_cameras_.count(ev.camera_ip)) return;
   }
 
   auto det = classify(ev);
