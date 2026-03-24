@@ -361,7 +361,7 @@ struct SqliteBackend final : DetectionRecorder::IDbBackend {
       "INSERT INTO events"
       " (id, type, start, cameraId, score, smartDetectTypes,"
       "  metadata, locked, thumbnailId, createdAt, updatedAt)"
-      " VALUES (?, 'smartDetectZone', ?, ?, 0, ?,"
+      " VALUES (?, 'motion', ?, ?, 0, ?,"
       "         '{}', 0, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
@@ -530,7 +530,7 @@ struct PgBackend final : DetectionRecorder::IDbBackend {
       "INSERT INTO events"
       " (id, type, start, \"cameraId\", score, \"smartDetectTypes\","
       "  metadata, locked, \"thumbnailId\", \"createdAt\", \"updatedAt\")"
-      " VALUES ($1, 'smartDetectZone', $2::bigint, $3, 0, $4::json,"
+      " VALUES ($1, 'motion', $2::bigint, $3, 0, $4::json,"
       "         '{}'::json, false, $5, $6, $7)",
       7, params);
   }
